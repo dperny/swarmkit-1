@@ -46,6 +46,10 @@ message LogSubscriptionOptions {
 	// should be sent.
 	// Note: can't use stdtime because this field is nullable.
 	google.protobuf.Timestamp since = 4;
+
+	// Until indicates that only log messages produced up to this timestamp
+	// should be sent
+	google.protobuf.Timestamp until = 5;
 }
 
 // LogSelector will match logs from ANY of the defined parameters.
