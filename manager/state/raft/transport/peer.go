@@ -133,7 +133,15 @@ func (p *peer) resolveAddr(ctx context.Context, id uint64) (string, error) {
 }
 
 func (p *peer) sendProcessMessage(ctx context.Context, m raftpb.Message) error {
-	ctx, cancel := context.WithTimeout(ctx, p.tr.config.SendTimeout)
+	// set the timeout. if we're sending a large message, use the
+	// LargeSendTimeout instead so we don't timeout waiting for data to go
+	// through the pipe.
+	timeout := p.tr.config.SendTimeout
+	// the only kind of large message right now is MsgSnap, a raft snapshot.
+	if m.Type == raftpb.MsgSnap {
+		timeout = p.tr.config.LargeSendTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	_, err := api.NewRaftClient(p.conn()).ProcessRaftMessage(ctx, &api.ProcessRaftMessageRequest{Message: &m})
 	if grpc.Code(err) == codes.NotFound && grpc.ErrorDesc(err) == membership.ErrMemberRemoved.Error() {
