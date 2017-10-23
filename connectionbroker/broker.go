@@ -62,9 +62,17 @@ func (b *Broker) SelectRemote(dialOpts ...grpc.DialOption) (*Conn, error) {
 
 	dialOpts = append(dialOpts,
 		grpc.WithUnaryInterceptor(grpc_prometheus.UnaryClientInterceptor),
-		grpc.WithStreamInterceptor(grpc_prometheus.StreamClientInterceptor))
-
-	cc, err := grpc.Dial(peer.Addr, dialOpts...)
+		grpc.WithStreamInterceptor(grpc_prometheus.StreamClientInterceptor),
+		// GRPC changed so that it looks at proxy environment variables. But that
+		// doesn't work for us. Fortunately, we can pass our own dialer, such that
+		// we avoid this proxy resolution. The unpleasant thing is that if the
+		// user actually for some reason NEEDS a proxy, this will break that
+		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
+			return net.DialTimeout("tcp", addr, timeout)
+		}),
+	)
+	// we use DialContext because if t
+	cc, err := grpc.DialContext(peer.Addr, dialOpts...)
 	if err != nil {
 		b.remotes.ObserveIfExists(peer, -remotes.DefaultObservationWeight)
 		return nil, err
