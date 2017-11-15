@@ -789,7 +789,7 @@ func TestNodeAllocator(t *testing.T) {
 		assert.NoError(t, store.CreateNetwork(tx, p))
 		return nil
 	}))
-	watchNetwork(t, netWatch, false, isValidNetwork) // bridge
+	watchNetwork(t, netWatch, true, isValidNetwork) // bridge
 
 	s.View(func(tx store.ReadTx) {
 		node1FromStore = store.GetNode(tx, node1.ID)
