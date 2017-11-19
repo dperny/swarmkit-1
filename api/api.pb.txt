@@ -514,6 +514,38 @@ file {
       type_name: ".google.protobuf.EnumOptions"
       json_name: "options"
     }
+    field {
+      name: "reserved_range"
+      number: 4
+      label: LABEL_REPEATED
+      type: TYPE_MESSAGE
+      type_name: ".google.protobuf.EnumDescriptorProto.EnumReservedRange"
+      json_name: "reservedRange"
+    }
+    field {
+      name: "reserved_name"
+      number: 5
+      label: LABEL_REPEATED
+      type: TYPE_STRING
+      json_name: "reservedName"
+    }
+    nested_type {
+      name: "EnumReservedRange"
+      field {
+        name: "start"
+        number: 1
+        label: LABEL_OPTIONAL
+        type: TYPE_INT32
+        json_name: "start"
+      }
+      field {
+        name: "end"
+        number: 2
+        label: LABEL_OPTIONAL
+        type: TYPE_INT32
+        json_name: "end"
+      }
+    }
   }
   message_type {
     name: "EnumValueDescriptorProto"
@@ -698,7 +730,7 @@ file {
     }
     field {
       name: "php_generic_services"
-      number: 19
+      number: 42
       label: LABEL_OPTIONAL
       type: TYPE_BOOL
       default_value: "false"
@@ -1256,6 +1288,7 @@ file {
     java_outer_classname: "DescriptorProtos"
     optimize_for: SPEED
     go_package: "github.com/golang/protobuf/protoc-gen-go/descriptor;descriptor"
+    cc_enable_arenas: true
     objc_class_prefix: "GPB"
     csharp_namespace: "Google.Protobuf.Reflection"
   }
@@ -3448,6 +3481,41 @@ file {
     }
   }
   message_type {
+    name: "SpecSigningConfig"
+    field {
+      name: "enable"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_BOOL
+      json_name: "enable"
+    }
+    field {
+      name: "algorithm"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_ENUM
+      type_name: ".docker.swarmkit.v1.SpecSigningConfig.Algorithm"
+      json_name: "algorithm"
+    }
+    field {
+      name: "public_key"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_BYTES
+      json_name: "publicKey"
+    }
+    enum_type {
+      name: "Algorithm"
+      value {
+        name: "RSA"
+        number: 0
+      }
+      options {
+        62001: 0
+      }
+    }
+  }
+  message_type {
     name: "SpreadOver"
     field {
       name: "spread_descriptor"
@@ -4005,6 +4073,16 @@ file {
       }
     }
   }
+  message_type {
+    name: "SpecSignature"
+    field {
+      name: "signature"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_BYTES
+      json_name: "signature"
+    }
+  }
   enum_type {
     name: "ResourceType"
     value {
@@ -4320,6 +4398,22 @@ file {
       type_name: ".docker.swarmkit.v1.NodeSpec.Availability"
       json_name: "availability"
     }
+    field {
+      name: "spec_signing_config"
+      number: 5
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSigningConfig"
+      json_name: "specSigningConfig"
+    }
+    field {
+      name: "signature"
+      number: 6
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
     enum_type {
       name: "Membership"
       value {
@@ -4445,6 +4539,14 @@ file {
       type_name: ".docker.swarmkit.v1.EndpointSpec"
       json_name: "endpoint"
     }
+    field {
+      name: "signature"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
     oneof_decl {
       name: "mode"
     }
@@ -4549,6 +4651,14 @@ file {
       }
       json_name: "resourceReferences"
     }
+    field {
+      name: "signature"
+      number: 12
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
     oneof_decl {
       name: "runtime"
     }
@@ -4588,6 +4698,14 @@ file {
       type_name: ".google.protobuf.Any"
       json_name: "payload"
     }
+    field {
+      name: "signature"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
   }
   message_type {
     name: "NetworkAttachmentSpec"
@@ -4597,6 +4715,14 @@ file {
       label: LABEL_OPTIONAL
       type: TYPE_STRING
       json_name: "containerId"
+    }
+    field {
+      name: "signature"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
     }
   }
   message_type {
@@ -4796,6 +4922,14 @@ file {
       type: TYPE_INT64
       json_name: "pidsLimit"
     }
+    field {
+      name: "signature"
+      number: 26
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
     nested_type {
       name: "LabelsEntry"
       field {
@@ -4896,6 +5030,14 @@ file {
       type_name: ".docker.swarmkit.v1.PortConfig"
       json_name: "ports"
     }
+    field {
+      name: "signature"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
     enum_type {
       name: "ResolutionMode"
       value {
@@ -4984,6 +5126,14 @@ file {
       type: TYPE_STRING
       oneof_index: 0
       json_name: "network"
+    }
+    field {
+      name: "signature"
+      number: 9
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
     }
     oneof_decl {
       name: "config_from"
@@ -5081,6 +5231,25 @@ file {
       }
       json_name: "encryptionConfig"
     }
+    field {
+      name: "spec_signing_config"
+      number: 9
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSigningConfig"
+      options {
+        65001: 0
+      }
+      json_name: "specSigningConfig"
+    }
+    field {
+      name: "signature"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
   }
   message_type {
     name: "SecretSpec"
@@ -5118,6 +5287,14 @@ file {
       type_name: ".docker.swarmkit.v1.Driver"
       json_name: "driver"
     }
+    field {
+      name: "signature"
+      number: 5
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
+    }
   }
   message_type {
     name: "ConfigSpec"
@@ -5146,6 +5323,14 @@ file {
       type: TYPE_MESSAGE
       type_name: ".docker.swarmkit.v1.Driver"
       json_name: "templating"
+    }
+    field {
+      name: "signature"
+      number: 4
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.SpecSignature"
+      json_name: "signature"
     }
   }
   syntax: "proto3"

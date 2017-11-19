@@ -1,6 +1,6 @@
 version = "unstable"
 generator = "gogoswarm"
-plugins = ["grpc", "deepcopy", "storeobject", "raftproxy", "authenticatedwrapper"]
+plugins = ["grpc", "deepcopy", "storeobject", "raftproxy", "authenticatedwrapper", "signablespec"]
 
 # Control protoc include paths. Below are usually some good defaults, but feel
 # free to try it without them if it works for your project.

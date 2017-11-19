@@ -195,6 +195,7 @@
 		DispatcherConfig
 		RaftConfig
 		EncryptionConfig
+		SpecSigningConfig
 		SpreadOver
 		PlacementPreference
 		Placement
@@ -211,6 +212,7 @@
 		MaybeEncryptedRecord
 		RootRotation
 		Privileges
+		SpecSignature
 		Object
 		SelectBySlot
 		SelectByCustom
