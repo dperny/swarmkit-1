@@ -64,6 +64,10 @@ func init() {
 // CreateSecret adds a new secret to the store.
 // Returns ErrExist if the ID is already taken.
 func CreateSecret(tx Tx, s *api.Secret) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &s.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is not already in use.
 	if tx.lookup(tableSecret, indexName, strings.ToLower(s.Spec.Annotations.Name)) != nil {
 		return ErrNameConflict
@@ -75,6 +79,10 @@ func CreateSecret(tx Tx, s *api.Secret) error {
 // UpdateSecret updates an existing secret in the store.
 // Returns ErrNotExist if the secret doesn't exist.
 func UpdateSecret(tx Tx, s *api.Secret) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &s.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is either not in use or already used by this same Secret.
 	if existing := tx.lookup(tableSecret, indexName, strings.ToLower(s.Spec.Annotations.Name)); existing != nil {
 		if existing.GetID() != s.ID {

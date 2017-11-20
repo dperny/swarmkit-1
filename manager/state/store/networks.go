@@ -64,6 +64,10 @@ func init() {
 // CreateNetwork adds a new network to the store.
 // Returns ErrExist if the ID is already taken.
 func CreateNetwork(tx Tx, n *api.Network) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &n.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is not already in use.
 	if tx.lookup(tableNetwork, indexName, strings.ToLower(n.Spec.Annotations.Name)) != nil {
 		return ErrNameConflict
@@ -75,6 +79,10 @@ func CreateNetwork(tx Tx, n *api.Network) error {
 // UpdateNetwork updates an existing network in the store.
 // Returns ErrNotExist if the network doesn't exist.
 func UpdateNetwork(tx Tx, n *api.Network) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &n.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is either not in use or already used by this same Network.
 	if existing := tx.lookup(tableNetwork, indexName, strings.ToLower(n.Spec.Annotations.Name)); existing != nil {
 		if existing.GetID() != n.ID {

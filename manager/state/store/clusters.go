@@ -81,6 +81,9 @@ func CreateCluster(tx Tx, c *api.Cluster) error {
 // UpdateCluster updates an existing cluster in the store.
 // Returns ErrNotExist if the cluster doesn't exist.
 func UpdateCluster(tx Tx, c *api.Cluster) error {
+	if err := VerifySpecInTx(tx, &c.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is either not in use or already used by this same Cluster.
 	if existing := tx.lookup(tableCluster, indexName, strings.ToLower(c.Spec.Annotations.Name)); existing != nil {
 		if existing.GetID() != c.ID {

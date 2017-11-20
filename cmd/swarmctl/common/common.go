@@ -1,12 +1,18 @@
 package common
 
 import (
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"io/ioutil"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/docker/swarmkit/api"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"golang.org/x/net/context"
@@ -90,4 +96,20 @@ func ParseLogDriverFlags(flags *pflag.FlagSet) (*api.Driver, error) {
 		Name:    name,
 		Options: opts,
 	}, nil
+}
+
+func GetSigningKey(filename string) (*rsa.PrivateKey, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	pemfile, err := ioutil.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	pemkey, _ := pem.Decode(pemfile)
+	if pemkey == nil {
+		return nil, errors.New("invalid pem file")
+	}
+	return x509.ParsePKCS1PrivateKey(pemkey.Bytes)
 }

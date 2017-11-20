@@ -3490,29 +3490,11 @@ file {
       json_name: "enable"
     }
     field {
-      name: "algorithm"
-      number: 2
-      label: LABEL_OPTIONAL
-      type: TYPE_ENUM
-      type_name: ".docker.swarmkit.v1.SpecSigningConfig.Algorithm"
-      json_name: "algorithm"
-    }
-    field {
       name: "public_key"
-      number: 3
+      number: 2
       label: LABEL_OPTIONAL
       type: TYPE_BYTES
       json_name: "publicKey"
-    }
-    enum_type {
-      name: "Algorithm"
-      value {
-        name: "RSA"
-        number: 0
-      }
-      options {
-        62001: 0
-      }
     }
   }
   message_type {

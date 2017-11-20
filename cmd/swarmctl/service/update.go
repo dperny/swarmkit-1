@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"reflect"
@@ -8,6 +10,7 @@ import (
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/cmd/swarmctl/common"
 	"github.com/docker/swarmkit/cmd/swarmctl/service/flagparser"
+	"github.com/docker/swarmkit/specsignature"
 	"github.com/spf13/cobra"
 )
 
@@ -52,6 +55,28 @@ var (
 			}
 			if err := flagparser.ParseRemoveConfig(cmd, spec, "rm-config"); err != nil {
 				return err
+			}
+
+			if cmd.Flags().Changed("keyfile") {
+				keyfile, err := cmd.Flags().GetString("keyfile")
+				if err != nil {
+					return err
+				}
+				key, err := common.GetSigningKey(keyfile)
+				if err != nil {
+					return err
+				}
+				specsignature.SignSpec(spec, key)
+				clusters, err := c.ListClusters(common.Context(cmd), &api.ListClustersRequest{})
+				vkey := clusters.Clusters[0].Spec.SpecSigningConfig.PublicKey
+				fmt.Println("trying to verify with cluster's public key")
+				vkeyrsa, err := x509.ParsePKIXPublicKey(vkey)
+				if err != nil {
+					return err
+				}
+				if err := specsignature.VerifySpec(spec, vkeyrsa.(*rsa.PublicKey)); err != nil {
+					return fmt.Errorf("error verifying with cluster's key: %v", err)
+				}
 			}
 
 			if reflect.DeepEqual(spec, &service.Spec) {

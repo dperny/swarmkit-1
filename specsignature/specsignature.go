@@ -47,6 +47,8 @@ func SignSpec(spec api.SignableSpec, key *rsa.PrivateKey) error {
 // VerifySpec verifies that the signature on the spec is valid. If the
 // signature is invalid, an error will be returned. Otherwise, nil will be
 // returned.
+// TODO(dperny): change type of key to bytes so that you can pass any DER
+// binary as the key
 func VerifySpec(spec api.SignableSpec, key *rsa.PublicKey) error {
 	if spec == nil {
 		return errors.New("spec is nil")
@@ -68,5 +70,8 @@ func VerifySpec(spec api.SignableSpec, key *rsa.PublicKey) error {
 		return errors.Wrap(err, "error marshalling proto")
 	}
 	digest := sha256.Sum256(bytes)
+	// We only have to verify the top-level spec, because the top-level spec
+	// contains all of the constituient parts, so we know it hasn't been
+	// tampered with
 	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig.Signature)
 }

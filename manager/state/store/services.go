@@ -85,6 +85,10 @@ func init() {
 // CreateService adds a new service to the store.
 // Returns ErrExist if the ID is already taken.
 func CreateService(tx Tx, s *api.Service) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &s.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is not already in use.
 	if tx.lookup(tableService, indexName, strings.ToLower(s.Spec.Annotations.Name)) != nil {
 		return ErrNameConflict
@@ -96,6 +100,10 @@ func CreateService(tx Tx, s *api.Service) error {
 // UpdateService updates an existing service in the store.
 // Returns ErrNotExist if the service doesn't exist.
 func UpdateService(tx Tx, s *api.Service) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &s.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is either not in use or already used by this same Service.
 	if existing := tx.lookup(tableService, indexName, strings.ToLower(s.Spec.Annotations.Name)); existing != nil {
 		if existing.GetID() != s.ID {

@@ -1,14 +1,20 @@
 package cluster
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/cli"
 	"github.com/docker/swarmkit/cmd/swarmctl/common"
+	"github.com/docker/swarmkit/specsignature"
 	gogotypes "github.com/gogo/protobuf/types"
 	"github.com/spf13/cobra"
 )
@@ -101,6 +107,64 @@ var (
 			}
 			spec.TaskDefaults.LogDriver = driver
 
+			if flags.Changed("enable-spec-signing") {
+				fmt.Println("disabling spec signing")
+				e, err := flags.GetBool("enable-spec-signing")
+				if err != nil {
+					return err
+				}
+				spec.SpecSigningConfig.Enable = e
+			}
+			if flags.Changed("spec-signing-keyfile") {
+				f, err := flags.GetString("spec-signing-keyfile")
+				if err != nil {
+					return err
+				}
+				fh, err := os.Open(f)
+				if err != nil {
+					return err
+				}
+				pemfile, err := ioutil.ReadAll(fh)
+				if err != nil {
+					return err
+				}
+				k, _ := pem.Decode(pemfile)
+				if k == nil {
+					return errors.New("invalid pemfile")
+				}
+
+				spec.SpecSigningConfig.PublicKey = k.Bytes
+			}
+
+			if cluster.Spec.SpecSigningConfig.Enable || spec.SpecSigningConfig.Enable || true {
+				fmt.Println("checking cluster verifies with own key...")
+				cpk, err := x509.ParsePKIXPublicKey(cluster.Spec.SpecSigningConfig.PublicKey)
+				if err := specsignature.VerifySpec(&cluster.Spec, cpk.(*rsa.PublicKey)); err != nil {
+					return fmt.Errorf("Cluster does not verify with own key: %v", err)
+				}
+				fmt.Println("trying to verify with cluster's public key")
+				file, err := flags.GetString("keyfile")
+				if err != nil {
+					return err
+				}
+				key, err := common.GetSigningKey(file)
+				if err != nil {
+					return err
+				}
+				specsignature.SignSpec(spec, key)
+				vkey := cluster.Spec.SpecSigningConfig.PublicKey
+				fmt.Println("trying to verify with cluster's public key")
+				pem.Encode(os.Stdout, &pem.Block{Bytes: vkey})
+				vkeyrsa, err := x509.ParsePKIXPublicKey(vkey)
+				if err != nil {
+					return err
+				}
+				if err := specsignature.VerifySpec(spec, vkeyrsa.(*rsa.PublicKey)); err != nil {
+					return fmt.Errorf("error verifying with cluster's key: %v", err)
+				}
+				fmt.Println("verifies with cluster's public key...")
+			}
+
 			r, err := c.UpdateCluster(common.Context(cmd), &api.UpdateClusterRequest{
 				ClusterID:      cluster.ID,
 				ClusterVersion: &cluster.Meta.Version,
@@ -131,4 +195,6 @@ func init() {
 	updateCmd.Flags().String("rotate-join-token", "", "Rotate join token for worker or manager")
 	updateCmd.Flags().Bool("rotate-unlock-key", false, "Rotate manager unlock key")
 	updateCmd.Flags().Bool("autolock", false, "Enable or disable manager autolocking (requiring an unlock key to start a stopped manager)")
+	updateCmd.Flags().Bool("enable-spec-signing", false, "Enable spec signing")
+	updateCmd.Flags().String("spec-signing-keyfile", "", "Spec signing public key file as a pem")
 }

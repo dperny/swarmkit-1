@@ -2711,6 +2711,26 @@ type SignableSpec interface {
 	GetSubspecs() []SignableSpec
 }
 
+func (s *NodeSpec) GetSignature() *SpecSignature {
+	if s == nil {
+		return nil
+	}
+	return s.Signature
+}
+func (s *NodeSpec) SetSignature(sig *SpecSignature) {
+	if s == nil {
+		return
+	}
+	s.Signature = sig
+}
+func (s *NodeSpec) GetSubspecs() []SignableSpec {
+	if s == nil {
+		return []SignableSpec{}
+	}
+	subspecs := []SignableSpec{}
+	return subspecs
+}
+
 func (s *TaskSpec) GetSignature() *SpecSignature {
 	if s == nil {
 		return nil
@@ -2741,39 +2761,19 @@ func (s *TaskSpec) GetSubspecs() []SignableSpec {
 	return subspecs
 }
 
-func (s *GenericRuntimeSpec) GetSignature() *SpecSignature {
+func (s *NetworkSpec) GetSignature() *SpecSignature {
 	if s == nil {
 		return nil
 	}
 	return s.Signature
 }
-func (s *GenericRuntimeSpec) SetSignature(sig *SpecSignature) {
+func (s *NetworkSpec) SetSignature(sig *SpecSignature) {
 	if s == nil {
 		return
 	}
 	s.Signature = sig
 }
-func (s *GenericRuntimeSpec) GetSubspecs() []SignableSpec {
-	if s == nil {
-		return []SignableSpec{}
-	}
-	subspecs := []SignableSpec{}
-	return subspecs
-}
-
-func (s *EndpointSpec) GetSignature() *SpecSignature {
-	if s == nil {
-		return nil
-	}
-	return s.Signature
-}
-func (s *EndpointSpec) SetSignature(sig *SpecSignature) {
-	if s == nil {
-		return
-	}
-	s.Signature = sig
-}
-func (s *EndpointSpec) GetSubspecs() []SignableSpec {
+func (s *NetworkSpec) GetSubspecs() []SignableSpec {
 	if s == nil {
 		return []SignableSpec{}
 	}
@@ -2801,6 +2801,26 @@ func (s *ClusterSpec) GetSubspecs() []SignableSpec {
 	return subspecs
 }
 
+func (s *SecretSpec) GetSignature() *SpecSignature {
+	if s == nil {
+		return nil
+	}
+	return s.Signature
+}
+func (s *SecretSpec) SetSignature(sig *SpecSignature) {
+	if s == nil {
+		return
+	}
+	s.Signature = sig
+}
+func (s *SecretSpec) GetSubspecs() []SignableSpec {
+	if s == nil {
+		return []SignableSpec{}
+	}
+	subspecs := []SignableSpec{}
+	return subspecs
+}
+
 func (s *ConfigSpec) GetSignature() *SpecSignature {
 	if s == nil {
 		return nil
@@ -2814,26 +2834,6 @@ func (s *ConfigSpec) SetSignature(sig *SpecSignature) {
 	s.Signature = sig
 }
 func (s *ConfigSpec) GetSubspecs() []SignableSpec {
-	if s == nil {
-		return []SignableSpec{}
-	}
-	subspecs := []SignableSpec{}
-	return subspecs
-}
-
-func (s *NodeSpec) GetSignature() *SpecSignature {
-	if s == nil {
-		return nil
-	}
-	return s.Signature
-}
-func (s *NodeSpec) SetSignature(sig *SpecSignature) {
-	if s == nil {
-		return
-	}
-	s.Signature = sig
-}
-func (s *NodeSpec) GetSubspecs() []SignableSpec {
 	if s == nil {
 		return []SignableSpec{}
 	}
@@ -2862,6 +2862,26 @@ func (s *ServiceSpec) GetSubspecs() []SignableSpec {
 	if ss := s.Endpoint; ss != nil {
 		subspecs = append(subspecs, ss)
 	}
+	return subspecs
+}
+
+func (s *GenericRuntimeSpec) GetSignature() *SpecSignature {
+	if s == nil {
+		return nil
+	}
+	return s.Signature
+}
+func (s *GenericRuntimeSpec) SetSignature(sig *SpecSignature) {
+	if s == nil {
+		return
+	}
+	s.Signature = sig
+}
+func (s *GenericRuntimeSpec) GetSubspecs() []SignableSpec {
+	if s == nil {
+		return []SignableSpec{}
+	}
+	subspecs := []SignableSpec{}
 	return subspecs
 }
 
@@ -2905,39 +2925,19 @@ func (s *ContainerSpec) GetSubspecs() []SignableSpec {
 	return subspecs
 }
 
-func (s *NetworkSpec) GetSignature() *SpecSignature {
+func (s *EndpointSpec) GetSignature() *SpecSignature {
 	if s == nil {
 		return nil
 	}
 	return s.Signature
 }
-func (s *NetworkSpec) SetSignature(sig *SpecSignature) {
+func (s *EndpointSpec) SetSignature(sig *SpecSignature) {
 	if s == nil {
 		return
 	}
 	s.Signature = sig
 }
-func (s *NetworkSpec) GetSubspecs() []SignableSpec {
-	if s == nil {
-		return []SignableSpec{}
-	}
-	subspecs := []SignableSpec{}
-	return subspecs
-}
-
-func (s *SecretSpec) GetSignature() *SpecSignature {
-	if s == nil {
-		return nil
-	}
-	return s.Signature
-}
-func (s *SecretSpec) SetSignature(sig *SpecSignature) {
-	if s == nil {
-		return
-	}
-	s.Signature = sig
-}
-func (s *SecretSpec) GetSubspecs() []SignableSpec {
+func (s *EndpointSpec) GetSubspecs() []SignableSpec {
 	if s == nil {
 		return []SignableSpec{}
 	}

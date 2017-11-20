@@ -74,12 +74,18 @@ func init() {
 // CreateNode adds a new node to the store.
 // Returns ErrExist if the ID is already taken.
 func CreateNode(tx Tx, n *api.Node) error {
+	if err := VerifySpecInTx(tx, &n.Spec); err != nil {
+		return err
+	}
 	return tx.create(tableNode, n)
 }
 
 // UpdateNode updates an existing node in the store.
 // Returns ErrNotExist if the node doesn't exist.
 func UpdateNode(tx Tx, n *api.Node) error {
+	if err := VerifySpecInTx(tx, &n.Spec); err != nil {
+		return err
+	}
 	return tx.update(tableNode, n)
 }
 

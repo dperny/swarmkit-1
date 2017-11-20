@@ -1,14 +1,19 @@
 package controlapi
 
 import (
+	"bytes"
 	"strings"
 	"time"
+
+	"crypto/rsa"
+	"crypto/x509"
 
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/ca"
 	"github.com/docker/swarmkit/log"
 	"github.com/docker/swarmkit/manager/encryption"
 	"github.com/docker/swarmkit/manager/state/store"
+	"github.com/docker/swarmkit/specsignature"
 	gogotypes "github.com/gogo/protobuf/types"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -24,6 +29,36 @@ const (
 func validateClusterSpec(spec *api.ClusterSpec) error {
 	if spec == nil {
 		return grpc.Errorf(codes.InvalidArgument, errInvalidArgument.Error())
+	}
+
+	// Validate that the signing key is real and correctly signs the spec, if
+	// we're turning signing on, so we can't accidentally commit a spec that
+	// can't be verified with its own key
+	// TODO(dperny) there needs to be a way to categorically remove the
+	// possibility of locking the cluster by rotating the key, besides this
+	// validation check.
+	if spec.Signature != nil && spec.SpecSigningConfig.Enable {
+		// unmarshal the key
+		k, err := x509.ParsePKIXPublicKey(spec.SpecSigningConfig.PublicKey)
+		if err != nil {
+			return grpc.Errorf(codes.InvalidArgument,
+				"spec turns on signing, but can't be verified with own key: %v",
+				err,
+			)
+		}
+		switch key := k.(type) {
+		case *rsa.PublicKey:
+			if err := specsignature.VerifySpec(spec, key); err != nil {
+				return grpc.Errorf(codes.InvalidArgument,
+					"spec turns on signing, but can't be verified with own key: %v",
+					err,
+				)
+			}
+		default:
+			return grpc.Errorf(codes.InvalidArgument,
+				"spec turns on signing, but can't be verified with own key: invalid key type",
+			)
+		}
 	}
 
 	// Validate that expiry time being provided is valid, and over our minimum
@@ -108,6 +143,14 @@ func (s *Server) UpdateCluster(ctx context.Context, request *api.UpdateClusterRe
 		if cluster == nil {
 			return grpc.Errorf(codes.NotFound, "cluster %s not found", request.ClusterID)
 		}
+		// Validate that the signing key hasn't changed.
+		// TODO(dperny): rotation story for this proof of concept is to update the
+		// spec to disable checking, and then update it again to include new key
+		if request.Spec.SpecSigningConfig.Enable &&
+			bytes.Equal(request.Spec.SpecSigningConfig.PublicKey, cluster.Spec.SpecSigningConfig.PublicKey) {
+			return grpc.Errorf(codes.FailedPrecondition, "must disable spec signing before updating signing key")
+		}
+
 		// This ensures that we have the current rootCA with which to generate tokens (expiration doesn't matter
 		// for generating the tokens)
 		rootCA, err := ca.RootCAFromAPI(ctx, &cluster.RootCA, ca.DefaultNodeCertExpiration)

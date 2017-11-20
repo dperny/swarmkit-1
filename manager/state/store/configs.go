@@ -64,6 +64,10 @@ func init() {
 // CreateConfig adds a new config to the store.
 // Returns ErrExist if the ID is already taken.
 func CreateConfig(tx Tx, c *api.Config) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &c.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is not already in use.
 	if tx.lookup(tableConfig, indexName, strings.ToLower(c.Spec.Annotations.Name)) != nil {
 		return ErrNameConflict
@@ -75,6 +79,10 @@ func CreateConfig(tx Tx, c *api.Config) error {
 // UpdateConfig updates an existing config in the store.
 // Returns ErrNotExist if the config doesn't exist.
 func UpdateConfig(tx Tx, c *api.Config) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &c.Spec); err != nil {
+		return err
+	}
 	// Ensure the name is either not in use or already used by this same Config.
 	if existing := tx.lookup(tableConfig, indexName, strings.ToLower(c.Spec.Annotations.Name)); existing != nil {
 		if existing.GetID() != c.ID {

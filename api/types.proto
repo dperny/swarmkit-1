@@ -821,20 +821,10 @@ message SpecSigningConfig {
   // Enable is whether to check all signatures
   bool enable = 1;
 
-	// Algorithm is the algorithm used with this key
-  enum Algorithm {
-    option (gogoproto.goproto_enum_prefix) = false;
-
-		// TODO(dperny): I don't know which algorithms are good actually which is a
-    // pretty dumb thing to not know but I'm a mediocre white guy and I'm not
-    // going to let me utter lack of qualifications stop me. So, anyway, todo
-    // add more algorithms
-    RSA = 0;
-  }
-  Algorithm algorithm = 2;
-
-	// PublicKey is the public key used to verify the signature of specs.
-  bytes public_key = 3;
+	// PublicKey is the public key used to verify the signature of specs. It's
+  // encoded in DER format and can be directly unmarshalled with, for example 
+  // in Go, x509.ParsePKIXPublicKey
+  bytes public_key = 2;
 }
 
 message SpreadOver {

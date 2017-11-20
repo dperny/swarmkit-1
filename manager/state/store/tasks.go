@@ -109,12 +109,20 @@ func init() {
 // CreateTask adds a new task to the store.
 // Returns ErrExist if the ID is already taken.
 func CreateTask(tx Tx, t *api.Task) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &t.Spec); err != nil {
+		return err
+	}
 	return tx.create(tableTask, t)
 }
 
 // UpdateTask updates an existing task in the store.
 // Returns ErrNotExist if the node doesn't exist.
 func UpdateTask(tx Tx, t *api.Task) error {
+	// Verify the signature of the spec
+	if err := VerifySpecInTx(tx, &t.Spec); err != nil {
+		return err
+	}
 	return tx.update(tableTask, t)
 }
 

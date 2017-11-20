@@ -49,6 +49,7 @@ func defaultSocket() string {
 func init() {
 	mainCmd.PersistentFlags().StringP("socket", "s", defaultSocket(), "Socket to connect to the Swarm manager")
 	mainCmd.PersistentFlags().BoolP("no-resolve", "n", false, "Do not try to map IDs to Names when displaying them")
+	mainCmd.PersistentFlags().String("keyfile", "", "File to look in for the spec signing private key")
 
 	mainCmd.AddCommand(
 		node.Cmd,

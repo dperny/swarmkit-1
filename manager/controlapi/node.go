@@ -17,6 +17,8 @@ func validateNodeSpec(spec *api.NodeSpec) error {
 	if spec == nil {
 		return grpc.Errorf(codes.InvalidArgument, errInvalidArgument.Error())
 	}
+	// TODO(dperny): validate node spec signature just like we validate cluster
+	// spec signature
 	return nil
 }
 
