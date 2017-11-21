@@ -44,8 +44,9 @@ func DeleteServiceTasks(ctx context.Context, s *store.MemoryStore, service *api.
 	err = s.Batch(func(batch *store.Batch) error {
 		for _, t := range tasks {
 			err := batch.Update(func(tx store.Tx) error {
-				if err := store.DeleteTask(tx, t.ID); err != nil {
-					log.G(ctx).WithError(err).Errorf("failed to delete task")
+				t.DesiredState = api.TaskStateShutdown
+				if err := store.UpdateTask(tx, t); err != nil {
+					log.G(ctx).WithError(err).Errorf("failed to set task to shutdown")
 				}
 				return nil
 			})

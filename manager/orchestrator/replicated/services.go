@@ -201,7 +201,7 @@ func (r *Orchestrator) addTasks(ctx context.Context, batch *store.Batch, service
 func (r *Orchestrator) deleteTasks(ctx context.Context, batch *store.Batch, slots []orchestrator.Slot) {
 	for _, slot := range slots {
 		for _, t := range slot {
-			r.deleteTask(ctx, batch, t)
+			r.shutdownTask(ctx, batch, t)
 		}
 	}
 }
@@ -209,14 +209,15 @@ func (r *Orchestrator) deleteTasks(ctx context.Context, batch *store.Batch, slot
 func (r *Orchestrator) deleteTasksMap(ctx context.Context, batch *store.Batch, slots map[uint64]orchestrator.Slot) {
 	for _, slot := range slots {
 		for _, t := range slot {
-			r.deleteTask(ctx, batch, t)
+			r.shutdownTask(ctx, batch, t)
 		}
 	}
 }
 
-func (r *Orchestrator) deleteTask(ctx context.Context, batch *store.Batch, t *api.Task) {
+func (r *Orchestrator) shutdownTask(ctx context.Context, batch *store.Batch, t *api.Task) {
 	err := batch.Update(func(tx store.Tx) error {
-		return store.DeleteTask(tx, t.ID)
+		t.DesiredState = api.TaskStateShutdown
+		return store.UpdateTask(tx, t)
 	})
 	if err != nil {
 		log.G(ctx).WithError(err).Errorf("deleting task %s failed", t.ID)

@@ -118,6 +118,15 @@ func (tr *TaskReaper) Run(ctx context.Context) {
 				if t.Status.State >= api.TaskStateOrphaned && t.ServiceID == "" {
 					tr.orphaned = append(tr.orphaned, t.ID)
 				}
+				if t.Status.State >= api.TaskStateCompleted && t.DesiredState >= api.TaskStateCompleted {
+					// if a task is in desired state shutdown AND in actual
+					// state shutdown, add it to the dirty list
+					tr.dirty[orchestrator.SlotTuple{
+						Slot:      t.Slot,
+						ServiceID: t.ServiceID,
+						NodeID:    t.NodeID,
+					}] = struct{}{}
+				}
 			case api.EventUpdateCluster:
 				tr.taskHistory = v.Cluster.Spec.Orchestration.TaskHistoryRetentionLimit
 			}
@@ -209,6 +218,22 @@ func (tr *TaskReaper) tick() {
 				}
 			}
 
+			// check if the history has any live tasks
+			anyLive := false
+			for _, t := range historicTasks {
+				if t.DesiredState <= api.TaskStateRunning || t.Status.State <= api.TaskStateRunning {
+					// Don't delete running tasks
+					anyLive = true
+				}
+			}
+			// if not, delete all of the tasks in the history
+			if !anyLive {
+				for _, t := range historicTasks {
+					deleteTasks[t.ID] = struct{}{}
+				}
+				continue
+			}
+
 			if int64(len(historicTasks)) <= taskHistory {
 				continue
 			}
@@ -219,6 +244,7 @@ func (tr *TaskReaper) tick() {
 			// clock time. We should store a Version in the Status field.
 			sort.Sort(orchestrator.TasksByTimestamp(historicTasks))
 
+			candidates := []string{}
 			runningTasks := 0
 			for _, t := range historicTasks {
 				if t.DesiredState <= api.TaskStateRunning || t.Status.State <= api.TaskStateRunning {
