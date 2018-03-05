@@ -27,6 +27,7 @@ import (
 	"github.com/docker/swarmkit/manager"
 	"github.com/docker/swarmkit/manager/encryption"
 	"github.com/docker/swarmkit/remotes"
+	"github.com/docker/swarmkit/watch"
 	"github.com/docker/swarmkit/xnet"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/pkg/errors"
@@ -129,11 +130,15 @@ type Config struct {
 // cluster. Node handles workloads and may also run as a manager.
 type Node struct {
 	sync.RWMutex
-	config           *Config
-	remotes          *persistentRemotes
-	connBroker       *connectionbroker.Broker
-	role             string
-	roleCond         *sync.Cond
+	config     *Config
+	remotes    *persistentRemotes
+	connBroker *connectionbroker.Broker
+	role       string
+	// roleWatch is an event queue for the node role. It is primarily used to
+	// notify waitRole that the node role has been updated. before publishing
+	// to roleWatch, n.Lock should be acquired. this ensures that subscribers
+	// can avoid missing events by acquiring n.RLock while while subscribing
+	roleWatch        *watch.Queue
 	conn             *grpc.ClientConn
 	connCond         *sync.Cond
 	nodeID           string
@@ -214,7 +219,7 @@ func New(c *Config) (*Node, error) {
 
 	n.connBroker = connectionbroker.New(n.remotes)
 
-	n.roleCond = sync.NewCond(n.RLocker())
+	n.roleWatch = watch.NewQueue()
 	n.connCond = sync.NewCond(n.RLocker())
 	return n, nil
 }
@@ -377,7 +382,10 @@ func (n *Node) run(ctx context.Context) (err error) {
 			}
 			n.Lock()
 			n.role = certUpdate.Role
-			n.roleCond.Broadcast()
+			// when publishing to roleWatch, always acquire a lock; this way,
+			// when new subscribers are added, they can acquire a read lock
+			// while doing so to avoid missing events
+			n.roleWatch.Publish(n.role)
 			n.Unlock()
 
 			// Export the new role.
@@ -455,6 +463,9 @@ func (n *Node) Stop(ctx context.Context) error {
 	n.Unlock()
 
 	n.stopOnce.Do(func() {
+		// close the role watch queue
+		// TODO(dperny) what to do with error value?
+		n.roleWatch.Close()
 		close(n.stopped)
 	})
 
@@ -745,7 +756,7 @@ func (n *Node) loadSecurityConfig(ctx context.Context, paths *ca.SecurityConfigP
 	n.Lock()
 	n.role = securityConfig.ClientTLSCreds.Role()
 	n.nodeID = securityConfig.ClientTLSCreds.NodeID()
-	n.roleCond.Broadcast()
+	n.roleWatch.Publish(n.role)
 	n.Unlock()
 
 	return securityConfig, cancel, nil
@@ -786,32 +797,36 @@ func (n *Node) initManagerConnection(ctx context.Context, ready chan<- struct{})
 }
 
 func (n *Node) waitRole(ctx context.Context, role string) error {
-	n.roleCond.L.Lock()
+	n.RLock()
+	// if the role is already what we need, then just return nil now, no need
+	// to  set up a wait
 	if role == n.role {
-		n.roleCond.L.Unlock()
 		return nil
 	}
-	finishCh := make(chan struct{})
-	defer close(finishCh)
-	go func() {
-		select {
-		case <-finishCh:
-		case <-ctx.Done():
-			// call broadcast to shutdown this function
-			n.roleCond.Broadcast()
-		}
-	}()
-	defer n.roleCond.L.Unlock()
-	for role != n.role {
-		n.roleCond.Wait()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+
+	// if not, watch the event queue. wait until AFTER we set up the queue to
+	// release the read lock, so we don't miss an update
+	events := n.roleWatch.WatchContext(ctx)
+	n.RUnlock()
+
+	// and wait for role updates to roll in
+	// NOTE(dperny): typically, in a package using `context`, you see a bare
+	// for loop with a select, so you can select on ctx.Done() in addition to
+	// the channel you're iterating over. however, because WatchContext is
+	// canceled with the provided context, we don't need that case, and can
+	// just do a regular iteration over the events queue
+	for ev := range events {
+		// the role is just a string, and so are the events. if the new role
+		// matches the one we're waiting for, just return
+		if newRole, ok := ev.(string); ok && newRole == role {
+			return nil
 		}
 	}
 
-	return nil
+	// we used to return ctx.Err() in this function, but because the events
+	// queue can be closed throgh more than just the context, return a new
+	// error
+	return errors.New("never got provided role")
 }
 
 func (n *Node) runManager(ctx context.Context, securityConfig *ca.SecurityConfig, rootPaths ca.CertPaths, ready chan struct{}, workerRole <-chan struct{}) (bool, error) {
