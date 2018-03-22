@@ -1,8 +1,9 @@
-package allocator
+package network
 
 import (
 	// standard libraries
 	"context"
+	"fmt"
 	"net"
 	"sync"
 
@@ -26,11 +27,7 @@ import (
 	// internal libraries
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/log"
-	"github.com/docker/swarmkit/manager/state"
-	"github.com/docker/swarmkit/manager/state/store"
-
 	// TODO(dperny): clean up networkallocator
-	"github.com/docker/swarmkit/manager/allocator/networkallocator"
 )
 
 const DefaultDriver = "overylay"
@@ -43,6 +40,10 @@ const DefaultDriver = "overylay"
 // objects and the underlying libnetwork primatives. It carries a lot of local
 // state by consequence of the fact that the underlying primatives are
 // local-only and need to be initialized each time they are used.
+//
+// In swarmkit you'll see two kinds of objects: components with an event loop,
+// and components which are strictly accessed through method calls. This is the
+// latter.
 //
 // NetworkAlloctor doesn't have direct access to the raft store. The caller
 // will provide all of the objects, and be in charge of committing those
@@ -92,17 +93,11 @@ type NetworkAllocator struct {
 	// channel. we should return the objects we've allocated to the caller
 	// through a channel of our own
 
-	// we don't really need a PluginGetter in this object, but we have to have
-	// it because of the way wait on creating the nwallocator until Init()
-	pg plugingetter.PluginGetter
-
+	// We need to keep a local copy of the plugingetter so that we can
+	// instantiate the driver registry in Init instead of in New, which lets us
+	// avoid having the constructor return errors.
+	pg          plugingetter.PluginGetter
 	drvRegistry *drvregistry.DrvRegistry
-	// startChan blocks the execution of Run until Init is called
-	startChan chan struct{}
-	// stopChan signals the Run routine to end
-	stopChan chan struct{}
-	// doneChan signals that the allocator has stopped
-	doneChan chan struct{}
 
 	// networks keeps track of the local state of networks we're currently
 	// servicing. because IPAM state is totally local, every run of the
@@ -122,9 +117,8 @@ type localNetworkState struct {
 	network *api.Network
 
 	// pools is used to save the internal poolIDs needed when releasing the
-	// pool. It maps an IPNet object (or, specifically, a pointer of), to the
-	// pool ID.
-	pools map[*net.IPNet]string
+	// pool. It maps an ip address to a pool ID.
+	pools map[string]string
 
 	// endpoints is a map of endpoint IP to the poolID from which it
 	// was allocated.
@@ -139,14 +133,16 @@ type localNetworkState struct {
 
 // NewNetworkAllocator returns the msot minimal NetworkAllocator object,
 // otherwise uninitialized. Because initialization might be a weighty action,
-// it's handled separately from the object creation
+// it's handled separately from the object creation. In addition, running
+// initialization in a separate step lets us avoid returning errors from this
+// constructor
 func NewNetworkAllocator(pg plugingetter.PluginGetter) *NetworkAllocator {
 	return &NetworkAllocator{
-		pg:        pg,
 		startChan: make(chan struct{}),
 		stopChan:  make(chan struct{}),
 		doneChan:  make(chan struct{}),
 		networks:  make(map[string]*localNetworkState),
+		pg:        pg,
 	}
 }
 
@@ -187,23 +183,15 @@ func NewNetworkAllocator(pg plugingetter.PluginGetter) *NetworkAllocator {
 // That would cause us to get into a permastuck situation, where the allocator
 // just crashes every time. We need to figure out how to correctly handle every
 // possible error that could be returned.
-func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, nodes []*api.Node, services []*api.Service, tasks []*api.Task) (retErr error) {
-	ctx = log.WithField("method", "(*NetworkAllocator).Init")
+func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, nodes []*api.Node, services []*api.Service, tasks []*api.Task) error {
+	ctx = log.WithField(ctx, "method", "(*NetworkAllocator).Init")
 	log.G(ctx).Debug("initializing network allocator")
-
-	// defer a function that will close the start channel and allow Run to
-	// proceed, if the Init is returning successfully.
-	defer func() {
-		if retErr == nil {
-			close(startChan)
-		}
-	}()
 
 	// initialize the drivers
 	log.G(ctx).Debug("initializing drivers")
 	// There are no driver configurations and notification
 	// functions as of now.
-	reg, err := drvregistry.New(nil, nil, nil, nil, pg)
+	reg, err := drvregistry.New(nil, nil, nil, nil, na.pg)
 	if err != nil {
 		return errors.Wrap(err, "unable to initialize drvRegistry")
 	}
@@ -213,7 +201,7 @@ func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, n
 	// platform we're on. the exact list can be found in the
 	// drivers_<platform>.go source files.
 	for _, i := range initializers {
-		if err := na.drvregistry.AddDriver(i.ntype, i.fn, nil); err != nil {
+		if err := na.DrvRegistry.AddDriver(i.ntype, i.fn, nil); err != nil {
 			return errors.Wrapf(err, "unable to initialize driver %v", i.ntype)
 		}
 	}
@@ -241,7 +229,7 @@ func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, n
 		// ones with a handle on it
 		local := &localNetworkState{
 			network: network,
-			pools:   make(map[*net.IPNet]string),
+			pools:   make(map[string]string),
 		}
 		name := getDriverName(local.network)
 		d, caps, err := na.resolveDriver(name)
@@ -291,7 +279,7 @@ func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, n
 					// an error because the allocator is failing to start with
 					// what should be a known-good config
 				}
-				local.pools[poolIP] = poolID
+				local.pools[poolip.String()] = poolID
 				// The IPAM contract allows the IPAM driver to autonomously
 				// provide a network gateway in response to the pool request.
 				// But if the network spec contains a gateway, we will allocate
@@ -476,73 +464,18 @@ func (na *NetworkAllocator) initNetworkAttachment(attachment *api.NetworkAttachm
 	return nil
 }
 
+// allocNetworkAttachment performs new allocation for the given network
+// attachment, filling in its fields with the allocated addresses. It returns
+// an error if allocation fails and rolls back any allocation that succeeded
+func allocNetworkAttachment(attachment *api.NetworkAttachment) error {
+}
+
 // getNetwork provides a concurrency-safe map access to the localNetworkState
 // object for the specified ID.
 func (na *NetworkAllocator) getNetwork(id string) (*localNetworkState, bool) {
 	na.networksMutex.RLock()
 	defer na.networksMutex.RUnlock()
 	return na.networks[id]
-}
-
-func (na *NetworkAllocator) Run(ctx context.Context, eventq <-chan events.Event) error {
-	ctx = log.WithModule("networkallocator")
-	log.G(ctx).Debug("waiting on start channel to unblock")
-	select {
-	case <-na.startChan:
-		// when startChan unblocks, we can proceed
-	case <-na.stopChan:
-		// stopChan tells us we've been stopped, so don't do any work
-		return nil
-	case <-ctx.Done():
-		// if the context is done, unblock
-		return ctx.Err()
-	}
-
-	// main run loop, go forever, selecting on channels for behavior
-	for {
-		select {
-		case <-stopChan:
-			// Allocator has stopped, exit cleanly
-			return nil
-		case <-ctx.Done():
-			// Allocator has been aborted, return the reason why
-			return ctx.Err()
-		case ev := <-events.Event:
-			na.handle(ctx, ev)
-		}
-	}
-}
-
-func (na *NetworkAllocator) Stop(ctx context.Context) error {
-	ctx = log.WithField("method", "(*NetworkAllocator).Stop")
-	// close the stop channel to signal that the network allocator should stop
-	close(na.stopChan)
-
-	select {
-	case <-na.doneChan:
-		// wait for the network allocator to finish
-		return nil
-	case <-ctx.Done():
-		return errors.Wrap(err, "context canceled while waiting for clean exit")
-	}
-}
-
-// handle recieves events and switches them to the appropriate handler
-func handle(ctx context.Context, ev events.Event) {
-	switch ev.(type) {
-	case api.EventCreateNetwork:
-	case api.EventUpdateNetwork:
-	case api.EventDeleteNetwork:
-	case api.EventCreateNode:
-	case api.EventUpdateNode:
-	case api.EventDeleteNode:
-	case api.EventCreateService:
-	case api.EventUpdateService:
-	case api.EventDeleteService:
-	case api.EventCreateTask:
-	case api.EventUpdateTask:
-	case api.EventDeleteTask:
-	}
 }
 
 // resolveDriver returns the information for a driver for the provided name
@@ -578,7 +511,7 @@ func (na *NetworkAllocator) resolveDriver(name string) (driverapi.Driver, *drive
 // resolveIPAM retrieves the IPAM driver and options for the network provided.
 // it returns the IPAM driver name, the IPAM driver, and the IPAM driver
 // options, or an error if resolving the IPAM driver fails, in that order.
-func (na *NetworkAllocator) resolveIPAM(n *api.Network) (string, ipamapi.IPAM, map[string]string, error) {
+func (na *NetworkAllocator) resolveIPAM(n *api.Network) (string, ipamapi.Ipam, map[string]string, error) {
 	// set default name and driver options
 	dName := ipamapi.DefaultIPAM
 	dOptions := map[string]string{}
