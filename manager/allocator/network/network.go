@@ -27,64 +27,15 @@ import (
 	// internal libraries
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/log"
+	"github.com/docker/swarmkit/manager/allocator/network/port"
 	// TODO(dperny): clean up networkallocator
 )
 
-const DefaultDriver = "overylay"
+const DefaultDriver = "overlay"
 
-// NetworkAllocator is the subcomponent in charge of allocating network
-// resources for swarmkit resources. Give it objects, and it gives you
-// resources.
-//
-// NetworkAllocator provides, essentially, an interface between swarmkit
-// objects and the underlying libnetwork primatives. It carries a lot of local
-// state by consequence of the fact that the underlying primatives are
-// local-only and need to be initialized each time they are used.
-//
-// In swarmkit you'll see two kinds of objects: components with an event loop,
-// and components which are strictly accessed through method calls. This is the
-// latter.
-//
-// NetworkAlloctor doesn't have direct access to the raft store. The caller
-// will provide all of the objects, and be in charge of committing those
-// objects to the raft store. Instead, it works directly on the api objects,
-// and gives them back to the caller to figure out how to store. This frees us
-// from having to worry about the overlying storage method, and reduces the
-// already rather bloated surface are of this component
-//
-// NetworkAllocator fully owns a few fields, and should be the _only_ component
-// that ever writes to them. Conversely, these are the _only_ fields that the
-// NetworkAllocator ever writes to, meaning it can safely work on an object
-// concurrently with other routines, (as long as they don't try to read these
-// fields) and the fields it owns can be merged into objects safely. These
-// fields are:
-//
-// - api.Network:
-//   - DriverState
-//   - IPAM
-// - api.Node:
-//   - Attachment
-//   - Attachments
-// - api.Service
-//   - Endpoint
-// - api.Task
-//   - Networks
-//   - Endpoint
-//
-// These are essentially all of the objects of types:
-// - api.Driver
-// - api.IPAMOptions
-// - api.NetworkAttachment
-// - api.Endpoint
-//
-// In addition, these objects are treated internally as "atomic". They're
-// either allcoated or not. A higher-level object like a Service or Task might
-// be partially allocated, with only some of the NetworkAttachments or
-// Endpoints matching the desired state, but each individual NetworkAttachment
-// and Endpoint will either be completely allocated or not allocated at all.
-// Treating these objects this way avoids the difficult problem of handling a
-// bunch of partial-allocation edge-cases.
-type NetworkAllocator struct {
+// Allocator is the actual object that keeps track of the currently allocated
+// state
+type Allocator struct {
 	// store is the memory store of cluster
 	// store *store.MemoryStore
 	// actually, we don't need store. we shouldn't use store. initialization
@@ -92,6 +43,8 @@ type NetworkAllocator struct {
 	// types we handle, and run-time should be accomplished through an event
 	// channel. we should return the objects we've allocated to the caller
 	// through a channel of our own
+
+	portAllocator *port.Allocator
 
 	// We need to keep a local copy of the plugingetter so that we can
 	// instantiate the driver registry in Init instead of in New, which lets us
@@ -104,15 +57,9 @@ type NetworkAllocator struct {
 	// allocator is going to produce a new set of local ipam ids.
 	// it is a map of network IDs to localNetworkState objects
 	networks map[string]*localNetworkState
-	// networksMutex protects concurrent access to the networks map
-	networksMutex sync.RWMutex
 }
 
 type localNetworkState struct {
-	// TODO(dperny): how much overhead is a mutex, and how important is it here
-	// this mutex protects access to the local network state object
-	sync.Mutex
-
 	// network is a local cache of the store object.
 	network *api.Network
 
@@ -131,18 +78,16 @@ type localNetworkState struct {
 	isNodeLocal bool
 }
 
-// NewNetworkAllocator returns the msot minimal NetworkAllocator object,
+// NewAllocator returns the msot minimal Allocator object,
 // otherwise uninitialized. Because initialization might be a weighty action,
 // it's handled separately from the object creation. In addition, running
 // initialization in a separate step lets us avoid returning errors from this
 // constructor
-func NewNetworkAllocator(pg plugingetter.PluginGetter) *NetworkAllocator {
-	return &NetworkAllocator{
-		startChan: make(chan struct{}),
-		stopChan:  make(chan struct{}),
-		doneChan:  make(chan struct{}),
-		networks:  make(map[string]*localNetworkState),
-		pg:        pg,
+func NewAllocator(pg plugingetter.PluginGetter) *Allocator {
+	return &Allocator{
+		portAllocator: port.NewAllocator(),
+		ipAllocator:   ip.NewAllocator(),
+		pg:            pg,
 	}
 }
 
@@ -183,8 +128,8 @@ func NewNetworkAllocator(pg plugingetter.PluginGetter) *NetworkAllocator {
 // That would cause us to get into a permastuck situation, where the allocator
 // just crashes every time. We need to figure out how to correctly handle every
 // possible error that could be returned.
-func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, nodes []*api.Node, services []*api.Service, tasks []*api.Task) error {
-	ctx = log.WithField(ctx, "method", "(*NetworkAllocator).Init")
+func (na *Allocator) Init(ctx context.Context, networks []*api.Network, nodes []*api.Node, services []*api.Service, tasks []*api.Task) error {
+	ctx = log.WithField(ctx, "method", "(*Allocator).Init")
 	log.G(ctx).Debug("initializing network allocator")
 
 	// initialize the drivers
@@ -380,7 +325,15 @@ func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, n
 		}
 	}
 	log.G(ctx).Debug("initializing state for services")
+	// now allocate services. the only field we care about here is the endpoint
 	for _, service := range services {
+		// if the service has no endpoint, then it's definitely not allocated,
+		// so skip to the next service
+		if serivce.Endpoint == nil {
+			continue
+		}
+		for _, port := range service.Endpoint.Ports {
+		}
 	}
 	log.G(ctx).Debug("initializing state for tasks")
 	for _, task := range tasks {
@@ -389,10 +342,10 @@ func (na *NetworkAllocator) Init(ctx context.Context, networks []*api.Network, n
 	return nil
 }
 
-// initNetworkAttachment initializes the NetworkAllocator's local state with
+// initNetworkAttachment initializes the Allocator's local state with
 // the information in a single network attachment. If the provided attachment
 // is not yet assigned any addresses, we ignore it and do NOT allocate any new.
-func (na *NetworkAllocator) initNetworkAttachment(attachment *api.NetworkAttachment) error {
+func (na *Allocator) initNetworkAttachment(attachment *api.NetworkAttachment) error {
 	var ip *net.IPNet
 	var opts map[string]string
 
@@ -472,7 +425,7 @@ func allocNetworkAttachment(attachment *api.NetworkAttachment) error {
 
 // getNetwork provides a concurrency-safe map access to the localNetworkState
 // object for the specified ID.
-func (na *NetworkAllocator) getNetwork(id string) (*localNetworkState, bool) {
+func (na *Allocator) getNetwork(id string) (*localNetworkState, bool) {
 	na.networksMutex.RLock()
 	defer na.networksMutex.RUnlock()
 	return na.networks[id]
@@ -481,7 +434,7 @@ func (na *NetworkAllocator) getNetwork(id string) (*localNetworkState, bool) {
 // resolveDriver returns the information for a driver for the provided name
 // it returns the driver and the driver capabailities, or an error if
 // resolution failed
-func (na *NetworkAllocator) resolveDriver(name string) (driverapi.Driver, *driverapi.Capability, error) {
+func (na *Allocator) resolveDriver(name string) (driverapi.Driver, *driverapi.Capability, error) {
 	d, drvcap := na.drvRegistry.Driver(dName)
 	// if the network driver is nil, it must be a plugin
 	if d == nil {
@@ -511,7 +464,7 @@ func (na *NetworkAllocator) resolveDriver(name string) (driverapi.Driver, *drive
 // resolveIPAM retrieves the IPAM driver and options for the network provided.
 // it returns the IPAM driver name, the IPAM driver, and the IPAM driver
 // options, or an error if resolving the IPAM driver fails, in that order.
-func (na *NetworkAllocator) resolveIPAM(n *api.Network) (string, ipamapi.Ipam, map[string]string, error) {
+func (na *Allocator) resolveIPAM(n *api.Network) (string, ipamapi.Ipam, map[string]string, error) {
 	// set default name and driver options
 	dName := ipamapi.DefaultIPAM
 	dOptions := map[string]string{}
@@ -549,4 +502,20 @@ func getDriverName(n *api.Network) string {
 		return n.Spec.DriverConfig.Name
 	}
 	return DefaultDriver
+}
+
+// AllocateNetwork takes a network object and performs allocation according to
+// the spec. It can be used for both newly created Network objects, as well as
+// those that have been updated. If AllocateNetwork is successful, it will fill
+// in the appropriate fields in the Network object before it returns a nil
+// error. If it does not succeed, an appropriate error message describing why
+// will be returned.
+func (na *Allocator) AllocateNetwork(n *api.Network) error {
+}
+
+// AllocateService allocates the Endpoint field on a Service according to the
+// spec. It is used for both newly created Services and those that have been
+// updated. If successful, it will fill in the Endpoint field on the Service.
+// If unsuccessful, it will return an error indicating what
+func (na *Allocator) AllocateService(s *api.Service) error {
 }

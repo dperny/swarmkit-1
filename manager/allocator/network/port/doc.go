@@ -10,7 +10,9 @@ package port
 // servies they are in use by. For the port allocator to function correctly,
 // the objects it works with must be in a consistent state. To facilitate this,
 // the port allocator "owns" the Endpoint.Ports field, and should be the only
-// component that creates the PortConfig objects contained in it.
+// component that creates the PortConfig objects contained in it. However,
+// unlike other Allocators, the port Allocator does not write directly to
+// Endpoint.Ports; doing so is the responsibility of the caller.
 //
 // Before the Allocator can be used, it needs to be initialized by calling its
 // Restore method. This populates the state of the Allocator with all of the
