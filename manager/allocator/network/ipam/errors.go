@@ -106,3 +106,59 @@ func IsErrBadState(e error) bool {
 	_, ok := e.(ErrBadState)
 	return ok
 }
+
+// ErrNetworkAllocated is an error type returned when a user tries to call
+// AllocateNetwork with a network that has already been allocated, because
+// network updates are not supported.
+type ErrNetworkAllocated struct {
+	nwid string
+}
+
+// Error returns a formatted error message explaining that the network is
+// already allocated and cannot be updated
+func (e ErrNetworkAllocated) Error() string {
+	return fmt.Sprintf(
+		"network %v is already allocated and network updates are not supported",
+		e.nwid,
+	)
+}
+
+// IsErrNetworkAllocated returns true if the type of the error is
+// ErrNetworkAllocated
+func IsErrNetworkAllocated(e error) bool {
+	_, ok := e.(ErrNetworkAllocated)
+	return ok
+}
+
+// ErrFailedPoolRequest is returned if requesting an IPAM pool fails
+type ErrFailedPoolRequest struct {
+	subnet, iprange string
+	err             error
+}
+
+// Error prints an error message explaining why the pool request failed
+func (e ErrFailedPoolRequest) Error() string {
+	return fmt.Sprintf(
+		"requesting pool (subnet: %q, range %q) returned an error %v",
+		e.subnet, e.iprange, e.err,
+	)
+}
+
+// IsErrFailedPoolRequest returns true if the type of the error is ErrInvalidPool
+func IsErrFailedPoolRequest(e error) bool {
+	_, ok := e.(ErrFailedPoolRequest)
+	return ok
+}
+
+// ErrFailedAddressRequest is the error type used if an address request to the
+// IPAM, either for a gateway, and endpoint, or an attachment, fails for any
+// reason.
+type ErrFailedAddressRequest struct {
+	address string
+	err     error
+}
+
+// Error returns a formatted message explaining which address failed and why
+func (e ErrFailedAddressRequest) Error() string {
+	return fmt.Sprintf("requesting address %v failed: %v", e.address, e.err)
+}

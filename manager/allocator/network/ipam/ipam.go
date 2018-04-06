@@ -277,19 +277,124 @@ func (a *Allocator) restoreAddress(nwid string, address string) error {
 	}
 }
 
-/*
 // AllocateNetwork allocates the IPAM pools for the given network. The network
-// IPAM driver information and config must be allocated before calling
-// AllocateNetwork, or this will fail. The provided network must not be nil.
+// must not be nil, and must not use a node-local driver
 func (a *Allocator) AllocateNetwork(n *api.Network) error {
-	// TODO(dperny): implement
+	// check if this network is already being managed and return an error if it
+	// is. networks are immutable and cannot be updated.
+	if _, ok := a.networks[n.ID]; ok {
+		return ErrNetworkAllocated{n.ID}
+	}
+
+	// Now get the IPAM driver and options, either the defaults or the user's
+	// specified options.
+	ipamName := ipamapi.DefaultIPAM
+	if n.Spec.IPAM != nil && n.Spec.IPAM.Driver != nil && n.Spec.IPAM.Driver.Name != "" {
+		ipamName = n.Spec.IPAM.Driver.Name
+	}
+	// make sure here that ipamOpts is not nil so we don't need to nil check it
+	// everywhere later
+	ipamOpts := map[string]string{}
+	if n.Spec.IPAM != nil && n.Spec.IPAM.Driver != nil && n.Spec.IPAM.Driver.Options != nil {
+		ipamOpts = n.Spec.IPAM.Driver.Options
+	}
+
+	ipam, _ := a.drvRegistry.IPAM(ipamName)
+	if ipam == nil {
+		return ErrInvalidIPAM{ipamName, n.ID}
+	}
+
+	// set these fields on the network object
+	n.IPAM = &api.IPAMOptions{
+		Driver: &api.Driver{
+			Name:    ipamName,
+			Options: ipamOpts,
+		},
+	}
+
+	_, addressSpace, err := ipam.GetDefaultAddressSpaces()
+	if err != nil {
+		return ErrBustedIPAM{ipamName, n.ID, err}
+	}
+
+	// now create the local network state object
 	local := &network{
 		nw:        n,
-		pools:     make(map[string]string),
-		endpoints: make(map[string]string),
+		pools:     map[string]string{},
+		endpoints: map[string]string{},
 	}
-	if local.nw.IPAM == nil {
+	var ipamConfigs []*api.IPAMConfig
+	if n.Spec.IPAM != nil && len(n.Spec.IPAM.Configs) == 0 {
+		// if the user has specified any IPAM configs, we'll use those
+		ipamConfigs = make([]*api.IPAMConfig, len(n.Spec.IPAM.Configs))
+	} else {
+		// otherwise, we'll create a single default IPAM config.
+		ipamConfigs = []*api.IPAMConfig{
+			{
+				Family: api.IPAMConfig_IPV4,
+			},
+		}
 	}
+	// make the slice to hold final IPAM configs
+	n.IPAM.Configs = make([]*api.IPAMConfig, 0, len(ipamConfigs))
+	// now go through all of the IPAM configs and allocate them. in the
+	// process, copy those configs to the object's configs.
+	for _, specConfig := range ipamConfigs {
+		config := specConfig.Copy()
+		// the last parameter of this is "v6 bool", but we don't support ipv6
+		// so we just pass "false"
+		poolID, poolIP, meta, err := ipam.RequestPool(addressSpace, config.Subnet, config.Range, ipamOpts, false)
+		if err != nil {
+			// TODO(dperny): if any of this fails, roll back all allocation
+			return ErrFailedPoolRequest{config.Subnet, config.Range, err}
+		}
+		local.pools[poolIP.String()] = poolID
+		// The IPAM contract allows the IPAM driver to autonomously provide a
+		// network gateway in response to the pool request.  But if the network
+		// spec contains a gateway, we will allocate it irrespective of whether
+		// the ipam driver returned one already.  If none of the above is true,
+		// we need to allocate one now, and let the driver know this request is
+		// for the network gateway.
+		var (
+			gwIP *net.IPNet
+			ip   net.IP
+		)
+
+		if gws, ok := meta[netlabel.Gateway]; ok {
+			if ip, gwIP, err = net.ParseCIDR(gws); err != nil {
+				return ErrBustedIPAM{
+					ipamName,
+					n.ID,
+					fmt.Errorf(
+						"can't parse gateway address (%v) returned by the ipam driver: %v",
+						gws, err,
+					),
+				}
+			}
+			gwIP.IP = ip
+		}
+		// add the option indicating that we're gonna request a gateway, and
+		// remove it before we exit this function
+		ipamOpts[ipamapi.RequestAddressType] = netlabel.Gateway
+		defer delete(ipamOpts, ipamapi.RequestAddressType)
+		if config.Gateway != "" || gwIP == nil {
+			gwIP, _, err = ipam.RequestAddress(poolID, net.ParseIP(config.Gateway), ipamOpts)
+			if err != nil {
+				return ErrFailedAddressRequest{config.Gateway, err}
+			}
+		}
+		if config.Subnet == "" {
+			config.Subnet = poolIP.String()
+		}
+		if config.Gateway == "" {
+			config.Gateway = gwIP.IP.String()
+		}
+		n.IPAM.Configs = append(n.IPAM.Configs, config)
+	}
+
+	// finally, if everything succeeded, add this to our set of allocated
+	// networks
+	a.networks[n.ID] = local
 	return nil
 }
 
@@ -303,4 +408,3 @@ func (a *Allocator) AllocateEndpoint(endpoint *api.Endpoint, spec *api.EndpointS
 func (a *Allocator) AllocateAttachment(attachment *api.NetworkAttachment, spec *api.NetworkAttachmentConfig) error {
 	return nil
 }
-*/
