@@ -29,17 +29,42 @@ func IsErrNetworkNotAllocated(e error) bool {
 // ErrInvalidIPAM is an error type returned if a given IPAM driver is invalid.
 type ErrInvalidIPAM struct {
 	ipam string
+	nwid string
 }
 
 // Error returns a formatted error string explaining which IPAM driver is not
 // valid
 func (e ErrInvalidIPAM) Error() string {
-	return fmt.Sprintf("ipam driver %v is not valid", e.ipam)
+	return fmt.Sprintf("ipam driver %v for network %v is not valid", e.ipam, e.nwid)
 }
 
 // IsErrInvalidIPAM returns true if the type of the error is ErrInvalidIPAM.
 func IsErrInvalidIPAM(e error) bool {
 	_, ok := e.(ErrInvalidIPAM)
+	return ok
+}
+
+// ErrBustedIPAM is the error type returned when an IPAM driver operation we
+// should expect to succeed fails. It contains the network ID, the IPAM driver
+// name, and the error that the IPAM driver returned.
+//
+// ErrBustedIPAM is different from ErrBadState; ErrBadState indicates that
+// something about our current state has caused a failure. ErrBustedIPAM is
+// the fault of the ipam driver, nothing wrong with our state.
+type ErrBustedIPAM struct {
+	ipam string
+	nwid string
+	err  error
+}
+
+// Error returns the formatted error message explaining what broke and why.
+func (e ErrBustedIPAM) Error() string {
+	return fmt.Sprintf("ipam error from driver %v on network %v: %v", e.ipam, e.nwid, e.err)
+}
+
+// IsErrBustedIPAM returns true if the type of the error is ErrBustedIPAM
+func IsErrBustedIPAM(e error) bool {
+	_, ok := e.(ErrBustedIPAM)
 	return ok
 }
 
@@ -58,5 +83,26 @@ func (e ErrInvalidAddress) Error() string {
 // ErrInvalidAddress.
 func IsErrInvalidAddress(e error) bool {
 	_, ok := e.(ErrInvalidAddress)
+	return ok
+}
+
+// ErrBadState is the error type returned when restoring the state of the
+// cluster to the local state encounters a problem that is likely a result of
+// inconsistent state. It includes the network id and a description of the
+// problem
+type ErrBadState struct {
+	nwid    string
+	problem string
+}
+
+// Error returns a formatted error string explaining what went wrong and with
+// what network
+func (e ErrBadState) Error() string {
+	return fmt.Sprintf("restoring ipam for network %v encountered a bad state: %v", e.nwid, e.problem)
+}
+
+// IsErrBadState returns true if the type of the error is ErrBadState
+func IsErrBadState(e error) bool {
+	_, ok := e.(ErrBadState)
 	return ok
 }

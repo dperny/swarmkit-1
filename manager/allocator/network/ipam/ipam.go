@@ -56,17 +56,13 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 	for _, nw := range networks {
 		// if the network has no IPAM field, it has no state, and there is
 		// nothing to do
-		if nw.IPAM == nil {
-			continue
-		}
-		// if the network has no IPAM driver, it has no IPAM state, and there
-		// is nothing to do.
-		if nw.IPAM.Driver == nil {
-			continue
-		}
-		// if the network has no ipam configs, then it has no state, and there
-		// is nothing to do
-		if len(nw.IPAM.Configs) == 0 {
+		if nw.IPAM == nil ||
+			// if the network has no IPAM driver, it has no IPAM state, and there
+			// is nothing to do.
+			nw.IPAM.Driver == nil ||
+			// if the network has no ipam configs, then it has no state, and there
+			// is nothing to do
+			len(nw.IPAM.Configs) == 0 {
 			continue
 		}
 		local := &network{
@@ -88,12 +84,12 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 		// that part of the return value
 		ipam, _ := a.drvRegistry.IPAM(ipamName)
 		if ipam == nil {
-			return ErrInvalidIPAM{ipamName}
+			return ErrInvalidIPAM{ipamName, nw.ID}
 		}
 		_, addressSpace, err := ipam.GetDefaultAddressSpaces()
 		// the only errors here result from having an invalid ipam driver
 		if err != nil {
-			return ErrInvalidIPAM{ipamName}
+			return ErrBustedIPAM{ipamName, nw.ID, err}
 		}
 
 		// now initialize the IPAM pools. IPAM pools are the set of addresses
@@ -110,8 +106,10 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 				// there is an error at this stage, it means the whole object
 				// store is in a bad state, so we don't do that, we just
 				// abandon everything.
-				// TODO(dperny): return a structured error here
-				return fmt.Errorf("error reserving ipam pool: %v", err)
+				return ErrBadState{
+					local.nw.ID,
+					fmt.Sprintf("error reserving ipam pool: %v", err),
+				}
 			}
 			// each IPAM pool we use has a separate ID referring to it. We also
 			// keep a map of each IP address we have allocated for this network
@@ -122,35 +120,43 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 			// set the IPAM request address type to "Gateway" to tell the IPAM
 			// driver that's the kind of address we're requesting
 			ipamOpts[ipamapi.RequestAddressType] = netlabel.Gateway
-			// and also set the ipam SerialAlloc option if it's not explicitly
-			// unset. this will persist through the whole local state.
-			if _, ok := ipamOpts[ipamapi.AllocSerialPrefix]; !ok {
-				ipamOpts[ipamapi.AllocSerialPrefix] = "true"
-			}
-			// delete the Gateway option from the IPAM options when we're done
-			delete(ipamOpts, ipamapi.RequestAddressType)
 			// and now, if we have a Gateway address for this network, we need
 			// to allocate it. This condition should never happen; a network
 			// with a valid IPAM config but an empty gateway is a recipe for
 			// disaster.  This is just included for completeness if an older
 			// version has incorrect state
 			if config.Gateway != "" {
-				gwIP, _, err := ipam.RequestAddress(poolID, net.ParseIP(config.Gateway), ipamOpts)
+				_, _, err := ipam.RequestAddress(poolID, net.ParseIP(config.Gateway), ipamOpts)
 				if err != nil {
-					// TODO(dperny) structured errors
-					return fmt.Errorf("error requesting already assigned gateway address %v")
+					return ErrBadState{
+						local.nw.ID,
+						fmt.Sprintf("error requesting already assigned gateway address %v", err),
+					}
 				}
-				if gwIP.String() != config.Gateway {
-					// if we get an IP address from this that isn't the one we
-					// requested, that's Very Bad.
-					// TODO(dperny) not sure if we need this check
-					return fmt.Errorf("got back gateway ip %v, but requested ip %v", gwIP, config.Gateway)
-				}
+				// NOTE(dperny): this check was originally here:
+				// if gwIP.IP.String() != config.Gateway {
+				//   // if we get an IP address from this that isn't the one we
+				//   // requested, that's Very Bad.
+				//   return ErrBadState{
+				//     local.nw.ID,
+				//     fmt.Sprintf("got back gateway ip %v, but requested ip %v", gwIP, config.Gateway),
+				//   }
+				// }
+				// it has been removed because we don't need it. this is a
+				// check that IPAM is behaving correctly. We don't need to
+				// check that IPAM is behaving correctly. Doing so makes this
+				// code less clear and harder to test. This has been left in
+				// so that this bolt of wisdom is shared with future
+				// contributors. A similar check was found in restoreAddress
+				// in the analogous location.
+
 				// most addresses need to be added to the map of
 				// address -> poolid, but we don't need to do this with the
 				// gateway address because it's store in the ipam config with
 				// the subnet, which is the key for the pools map.
 			}
+			// delete the Gateway option from the IPAM options when we're done
+			delete(ipamOpts, ipamapi.RequestAddressType)
 			// finally, add the network to the list of networks we're keeping
 			// track of.
 			a.networks[local.nw.ID] = local
@@ -217,7 +223,7 @@ func (a *Allocator) restoreAddress(nwid string, address string) error {
 	}
 	ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
 	if ipam == nil {
-		return ErrInvalidIPAM{local.nw.IPAM.Driver.Name}
+		return ErrInvalidIPAM{local.nw.IPAM.Driver.Name, local.nw.ID}
 	}
 	ipamOpts := local.nw.IPAM.Driver.Options
 	// NOTE(dperny): this code, where we try parsing as CIDR and
@@ -246,27 +252,32 @@ func (a *Allocator) restoreAddress(nwid string, address string) error {
 			continue
 		}
 		if err != nil {
-			// TODO(dperny): structure errors
-			return err
-		}
-		// make sure we got back the same address we requested
-		if ip.String() != addr.String() {
-			// TODO(dperny) structure errors
-			return fmt.Errorf("returned address %v did not match requested address %v", ip, addr)
+			return ErrBadState{
+				local.nw.ID,
+				fmt.Sprintf(
+					"error with driver %v requesting address %v: %v",
+					local.nw.IPAM.Driver.Name,
+					addr.String(),
+					err,
+				),
+			}
 		}
 		// if we get this far, the address belongs to this pool. add to the
 		// endpoints map for deallocation later and return nil, for no error
 		local.endpoints[ip.String()] = poolID
+		return nil
 	}
 	// if we get all the way through this loop, without jumping to
 	// the next iteration of the addresses loop, then we're in a
 	// weird situation where the address is out of range for
 	// _every_ pool on the network.
-	// TODO(dperny) do we really want to rely on errors from a higher package?
-	// probably not.
-	return ipamapi.ErrIPOutOfRange
+	return ErrBadState{
+		local.nw.ID,
+		fmt.Sprintf("requested address %v is out of range", addr),
+	}
 }
 
+/*
 // AllocateNetwork allocates the IPAM pools for the given network. The network
 // IPAM driver information and config must be allocated before calling
 // AllocateNetwork, or this will fail. The provided network must not be nil.
@@ -283,7 +294,7 @@ func (a *Allocator) AllocateNetwork(n *api.Network) error {
 }
 
 // AllocateEndpoint allocates the VIPs for the provided endpoint and spec
-func (a *Allocator) AllocateEndpoint(endpoint *api.Endpoint, spec *api.EndpointSpec) error {
+func (a *Allocator) AllocateEndpoint(endpoint *api.Endpoint, spec *api.EndpointSpec, networkIDs []string) error {
 	return nil
 }
 
@@ -292,3 +303,4 @@ func (a *Allocator) AllocateEndpoint(endpoint *api.Endpoint, spec *api.EndpointS
 func (a *Allocator) AllocateAttachment(attachment *api.NetworkAttachment, spec *api.NetworkAttachmentConfig) error {
 	return nil
 }
+*/

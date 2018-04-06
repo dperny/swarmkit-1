@@ -109,6 +109,9 @@ func (s *Server) CreateNetwork(ctx context.Context, request *api.CreateNetworkRe
 
 	// TODO(mrjana): Consider using `Name` as a primary key to handle
 	// duplicate creations. See #65
+	// NOTE(dperny): don't change the network creation logic. don't prepopulate
+	// fields or add anything to the object. We rely on the object being empty
+	// when it's created to know if it's allocated or not
 	n := &api.Network{
 		ID:   identity.NewID(),
 		Spec: *request.Spec,
