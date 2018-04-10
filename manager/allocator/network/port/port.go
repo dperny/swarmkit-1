@@ -85,6 +85,12 @@ func IsErrInvalidEndpoint(e error) bool {
 	return ok
 }
 
+type Allocator interface {
+	Restore([]*api.Endpoint)
+	Allocate(*api.Endpoint, *api.EndpointSpec) (Proposal, error)
+	Deallocate(*api.Endpoint) Proposal
+}
+
 // Allocator is an allocator component that manages the state of which
 // ports (and which protocols) are in use in the the cluster.
 //
@@ -95,7 +101,7 @@ func IsErrInvalidEndpoint(e error) bool {
 // allocator doesn't have to check for cases like two services having the same
 // port allocated; we created all of the fields, and we can know they are
 // consistent.
-type Allocator struct {
+type allocator struct {
 	// ports maps the ports in use. essentially, using map as a set
 	ports map[port]struct{}
 }
@@ -132,7 +138,7 @@ type Proposal interface {
 }
 
 type proposal struct {
-	pa         *Allocator
+	pa         *allocator
 	ports      []*api.PortConfig
 	allocate   map[port]struct{}
 	deallocate map[port]struct{}
@@ -180,15 +186,15 @@ func (prop *proposal) IsNoop() bool {
 }
 
 // NewAllocator returns a new instance of the Allocator object
-func NewAllocator() *Allocator {
-	return &Allocator{
+func NewAllocator() Allocator {
+	return &allocator{
 		ports: make(map[port]struct{}),
 	}
 }
 
 // Restore adds the current endpoints to the local state of the port allocator
 // but does not perform any new allocation.
-func (pa *Allocator) Restore(endpoints []*api.Endpoint) {
+func (pa *allocator) Restore(endpoints []*api.Endpoint) {
 	// NOTE(dperny) we can be sure that we're not allocating new or conflicting
 	// state because if an endpoint is unallocated, it will not have any ports.
 	// we can't look at the Spec in this method, because the spec isn't real
@@ -214,7 +220,7 @@ func (pa *Allocator) Restore(endpoints []*api.Endpoint) {
 
 // Deallocate takes an endpoint and provides a Proposal that will deallocate
 // all of its ports.
-func (pa *Allocator) Deallocate(endpoint *api.Endpoint) Proposal {
+func (pa *allocator) Deallocate(endpoint *api.Endpoint) Proposal {
 	prop := &proposal{
 		pa: pa,
 		// we only need deallocate
@@ -246,7 +252,13 @@ func (pa *Allocator) Deallocate(endpoint *api.Endpoint) Proposal {
 // another endpoint with this same Allocator, the caller must later call
 // Commit with the returned proposal. If the allocate is abandoned, then the
 // proposal can just be ignored.
-func (pa *Allocator) Allocate(endpoint *api.Endpoint, spec *api.EndpointSpec) (Proposal, error) {
+//
+// In the case of dynamically allocated ports, Allocate will try to prefer not
+// reassigning the same dynamically allocated port number that is being removed
+// to a new port that is being added. However, this behavior _is not tested_
+// and should _not_ be relied on as part of the API. It's a nice-to-have
+// implementation detail.
+func (pa *allocator) Allocate(endpoint *api.Endpoint, spec *api.EndpointSpec) (Proposal, error) {
 	// Ok, so Allocate is actually pretty tricky, because we do dynamic
 	// port allocation. This means if the user gives us no published port, we
 	// pick one for them. When we're updating ports, we have to figure out if

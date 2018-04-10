@@ -30,10 +30,20 @@ type network struct {
 	endpoints map[string]string
 }
 
-// Allocator is an allocator for IP addresses and IPAM pools. It handles all
+type Allocator interface {
+	Restore([]*api.Network, []*api.Endpoint, []*api.NetworkAttachment) error
+	AllocateNetwork(*api.Network) error
+	DeallocatNetwork(*api.Network) error
+	AllocateVIPs(*api.Endpoint, *api.EndpointSpec, []string) error
+	DeallocateVIPs(*api.Endpoint)
+	AllocateAttachment(*api.NetworkAttachment, *api.NetworkAttachmentConfig) error
+	DeallocateAttachment(*api.NetworkAttachment)
+}
+
+// allocator is an allocator for IP addresses and IPAM pools. It handles all
 // allocation and deallocation of IP addresses, both for VIPs and endpoints, in
 // addition to handling IPAM pools for networks.
-type Allocator struct {
+type allocator struct {
 	// networks maps network IDs to the locally stored network object
 	networks map[string]*network
 
@@ -42,8 +52,8 @@ type Allocator struct {
 	drvRegistry DrvRegistry
 }
 
-func NewAllocator(reg DrvRegistry) *Allocator {
-	return &Allocator{
+func NewAllocator(reg DrvRegistry) Allocator {
+	return &allocator{
 		networks:    make(map[string]*network),
 		drvRegistry: reg,
 	}
@@ -51,7 +61,7 @@ func NewAllocator(reg DrvRegistry) *Allocator {
 
 // Restore restores the state of the provided networks to the Allocator. It can
 // return errors if the initialization of its dependencies fails.
-func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, attachments []*api.NetworkAttachment) error {
+func (a *allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, attachments []*api.NetworkAttachment) error {
 	// Initialize the state of the networks. this gets the initial IPAM pools.
 	for _, nw := range networks {
 		// if the network has no IPAM field, it has no state, and there is
@@ -174,7 +184,7 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 			// also, check that the VIP address is allocated, so we don't try
 			// to allocate a new VIP. that's the most common class of error in
 			// the old allocator
-			if vip != nil && vip.Addr != "" {
+			if vip != nil {
 				if err := a.restoreAddress(vip.NetworkID, vip.Addr); err != nil {
 					return err
 				}
@@ -189,11 +199,6 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 		if attachment != nil && attachment.Network != nil {
 			nwid := attachment.Network.ID
 			for _, addr := range attachment.Addresses {
-				// we shouldn't have empty addresses here but who knows what
-				// state we've inherited from the old allocator
-				if addr == "" {
-					continue
-				}
 				if err := a.restoreAddress(nwid, addr); err != nil {
 					return err
 				}
@@ -209,10 +214,8 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 // restoreAddress is the common functionality needed to mark a given address in
 // use for the given network ID. if the address given is accidentally empty,
 // we'll return nil as there is nothing to restore but no error has occurred
-func (a *Allocator) restoreAddress(nwid string, address string) error {
-	// TODO(dperny): do we want this check...? the purpose of this function is
-	// primarily to deduplicate code common between restoring VIPs and
-	// Attachments
+func (a *allocator) restoreAddress(nwid string, address string) error {
+	// this check on address is shared by restoring VIPs and attachments.
 	if address == "" {
 		return nil
 	}
@@ -279,7 +282,7 @@ func (a *Allocator) restoreAddress(nwid string, address string) error {
 
 // AllocateNetwork allocates the IPAM pools for the given network. The network
 // must not be nil, and must not use a node-local driver
-func (a *Allocator) AllocateNetwork(n *api.Network) error {
+func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 	// check if this network is already being managed and return an error if it
 	// is. networks are immutable and cannot be updated.
 	if _, ok := a.networks[n.ID]; ok {
@@ -304,14 +307,6 @@ func (a *Allocator) AllocateNetwork(n *api.Network) error {
 		return ErrInvalidIPAM{ipamName, n.ID}
 	}
 
-	// set these fields on the network object
-	n.IPAM = &api.IPAMOptions{
-		Driver: &api.Driver{
-			Name:    ipamName,
-			Options: ipamOpts,
-		},
-	}
-
 	_, addressSpace, err := ipam.GetDefaultAddressSpaces()
 	if err != nil {
 		return ErrBustedIPAM{ipamName, n.ID, err}
@@ -324,9 +319,9 @@ func (a *Allocator) AllocateNetwork(n *api.Network) error {
 		endpoints: map[string]string{},
 	}
 	var ipamConfigs []*api.IPAMConfig
-	if n.Spec.IPAM != nil && len(n.Spec.IPAM.Configs) == 0 {
+	if n.Spec.IPAM != nil && len(n.Spec.IPAM.Configs) != 0 {
 		// if the user has specified any IPAM configs, we'll use those
-		ipamConfigs = make([]*api.IPAMConfig, len(n.Spec.IPAM.Configs))
+		ipamConfigs = n.Spec.IPAM.Configs
 	} else {
 		// otherwise, we'll create a single default IPAM config.
 		ipamConfigs = []*api.IPAMConfig{
@@ -336,16 +331,41 @@ func (a *Allocator) AllocateNetwork(n *api.Network) error {
 		}
 	}
 	// make the slice to hold final IPAM configs
-	n.IPAM.Configs = make([]*api.IPAMConfig, 0, len(ipamConfigs))
+	finalConfigs := make([]*api.IPAMConfig, 0, len(ipamConfigs))
+	// before we start allocating from ipam, set up this defer to roll back
+	// allocation in the case that allocation of any particular pool fails
+	defer func() {
+		if rerr != nil {
+			for _, config := range finalConfigs {
+				// only free addresses that were actually allocated
+				if ip := net.ParseIP(config.Gateway); ip != nil {
+					if err := ipam.ReleaseAddress(local.pools[config.Subnet], ip); err != nil {
+						rerr = ErrDoubleFault{rerr, err}
+						return
+					}
+				}
+			}
+			for _, pool := range local.pools {
+				if err := ipam.ReleasePool(pool); err != nil {
+					rerr = ErrDoubleFault{rerr, err}
+					return
+				}
+			}
+		}
+	}()
+
 	// now go through all of the IPAM configs and allocate them. in the
-	// process, copy those configs to the object's configs.
+	// process, copy those configs to the object's configs. we do copies in
+	// order to avoid inadvertantly modifying the spec.
+	//
+	// NOTE(dperny): be careful with this! if this loop doesn't run (because
+	// there were no items in ipamConfigs) then this will fail silently!
 	for _, specConfig := range ipamConfigs {
 		config := specConfig.Copy()
 		// the last parameter of this is "v6 bool", but we don't support ipv6
 		// so we just pass "false"
 		poolID, poolIP, meta, err := ipam.RequestPool(addressSpace, config.Subnet, config.Range, ipamOpts, false)
 		if err != nil {
-			// TODO(dperny): if any of this fails, roll back all allocation
 			return ErrFailedPoolRequest{config.Subnet, config.Range, err}
 		}
 		local.pools[poolIP.String()] = poolID
@@ -389,22 +409,41 @@ func (a *Allocator) AllocateNetwork(n *api.Network) error {
 		if config.Gateway == "" {
 			config.Gateway = gwIP.IP.String()
 		}
-		n.IPAM.Configs = append(n.IPAM.Configs, config)
+		finalConfigs = append(finalConfigs, config)
 	}
 
-	// finally, if everything succeeded, add this to our set of allocated
-	// networks
+	// now that everythign has succeeded, add the fields to the network object
+	n.IPAM = &api.IPAMOptions{
+		Driver: &api.Driver{
+			Name:    ipamName,
+			Options: ipamOpts,
+		},
+	}
+	n.IPAM.Configs = finalConfigs
+
+	// finally, add this network to the set of allocated networks.
 	a.networks[n.ID] = local
 	return nil
 }
 
-// AllocateEndpoint allocates the VIPs for the provided endpoint and spec
-func (a *Allocator) AllocateEndpoint(endpoint *api.Endpoint, spec *api.EndpointSpec, networkIDs []string) error {
+func (a *allocator) DeallocateNetwork(network *api.Network) error {
 	return nil
+}
+
+// AllocateVIPs allocates the VIPs for the provided endpoint and spec
+func (a *allocator) AllocateVIPs(endpoint *api.Endpoint, spec *api.EndpointSpec, networkIDs []string) error {
+	return nil
+}
+
+func (a *allocator) DeallocateVIPs(endpoint *api.Endpoint) {
 }
 
 // AllocateAttachment allocates the provided NetworkAttachment belonging to a
 // node or task
-func (a *Allocator) AllocateAttachment(attachment *api.NetworkAttachment, spec *api.NetworkAttachmentConfig) error {
+func (a *allocator) AllocateAttachment(attachment *api.NetworkAttachment, spec *api.NetworkAttachmentConfig) error {
 	return nil
+}
+
+func (a *allocator) DeallocateAttachment(attachment *api.NetworkAttachment) {
+
 }

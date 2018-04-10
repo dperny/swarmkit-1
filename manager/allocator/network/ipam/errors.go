@@ -139,7 +139,7 @@ type ErrFailedPoolRequest struct {
 // Error prints an error message explaining why the pool request failed
 func (e ErrFailedPoolRequest) Error() string {
 	return fmt.Sprintf(
-		"requesting pool (subnet: %q, range %q) returned an error %v",
+		"requesting pool (subnet: %q, range: %q) returned error: %v",
 		e.subnet, e.iprange, e.err,
 	)
 }
@@ -151,7 +151,7 @@ func IsErrFailedPoolRequest(e error) bool {
 }
 
 // ErrFailedAddressRequest is the error type used if an address request to the
-// IPAM, either for a gateway, and endpoint, or an attachment, fails for any
+// IPAM, either for a gateway, an endpoint, or an attachment, fails for any
 // reason.
 type ErrFailedAddressRequest struct {
 	address string
@@ -161,4 +161,41 @@ type ErrFailedAddressRequest struct {
 // Error returns a formatted message explaining which address failed and why
 func (e ErrFailedAddressRequest) Error() string {
 	return fmt.Sprintf("requesting address %v failed: %v", e.address, e.err)
+}
+
+// IsErrFailedAddressRequest returns true if the type of the error is
+// ErrFailedAddressRequest
+func IsErrFailedAddressRequest(e error) bool {
+	_, ok := e.(ErrFailedAddressRequest)
+	return ok
+}
+
+// ErrDoubleFault indicates that some error occurred while handling another
+// error. For example, if allocation of an entire object fails, and then
+// rolling back the already allocated bits of the object also fail, then
+// ErrDoubleFault will be returned.
+type ErrDoubleFault struct {
+	original, new error
+}
+
+// Error returns a formatted string explaining the original error and the new
+// one
+func (e ErrDoubleFault) Error() string {
+	return fmt.Sprintf("double fault: an error occurred while handling error %v: %v", e.original, e.new)
+}
+
+// Original returns the original error that started the error handling logic
+func (e ErrDoubleFault) Original() error {
+	return e.original
+}
+
+// New returns the error that occurred in the error handling logic
+func (e ErrDoubleFault) New() error {
+	return e.new
+}
+
+// IsErrDoubleFault returns true if the type of the error is ErrDoubleFault
+func IsErrDoubleFault(e error) bool {
+	_, ok := e.(ErrDoubleFault)
+	return ok
 }

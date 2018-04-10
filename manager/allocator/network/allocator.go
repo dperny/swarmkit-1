@@ -5,24 +5,54 @@ import (
 	"github.com/docker/libnetwork/drvregistry"
 
 	// the allocator types
-	"github.com/docker/swarmkit/manager/allocator/network/ip"
-	"github.com/docker/swarmkit/manager/allocator/network/network"
+	"github.com/docker/swarmkit/manager/allocator/network/drivers"
+	"github.com/docker/swarmkit/manager/allocator/network/ipam"
 	"github.com/docker/swarmkit/manager/allocator/network/port"
 
 	"github.com/docker/swarmkit/api"
 )
 
-type Allocator struct {
-	drvRegistry      *drvRegistry.DrvRegistry
-	ipAllocator      *ip.Allocator
-	networkAllocator *network.Allocator
-	portAllocator    *port.Allocator
+type DrvRegistry interface {
+	drivers.DrvRegistry
+	ipam.DrvRegistry
+}
+
+type Allocator interface {
+	Restore([]*api.Network, []*api.Endpoint, []*api.NetworkAttachment) error
+
+	AllocateNetwork(*api.Network) error
+	DeallocateNetwork(*api.Network) error
+
+	AllocateService(*api.Service) error
+	DeallocateService(*api.Service) error
+
+	AllocateTask(*api.Task) error
+	DeallocateTask(*api.Task) error
+
+	AllocateNode(*api.Node) error
+	DeallocateNode(*api.Node) error
+}
+
+type allocator struct {
+	// in order to figure out of the dependencies of a particular object are
+	// fulfilled, we need to keep track of what we have allocated already
+	// networks maps network ids to network objects
+	networks map[string]*api.Network
+	// endpoints maps service ids to endpoint objects
+	endpoints map[string]*api.Endpoint
+	// attachments don't need to be kept track of, because nothing depends on
+	// them
+
+	reg     DrvRegistry
+	ipam    ipam.Allocator
+	drivers drivers.Allocator
+	port    port.Allocator
 }
 
 // NewAllocator creates and returns a new, ready-to use allocator for all
 // network resources. Before it can be used, the caller must call Restore with
 // any existing objects that need to be restored to create the state
-func NewAllocator(pg plugingetter.PluginGetter) *Allocator {
+func NewAllocator(pg plugingetter.PluginGetter) Allocator {
 	// NOTE(dperny): the err return value is currently not used in
 	// drvregistry.New function. I get that it's very frowned upon to rely on
 	// implementation details like that, but it simplifies the allocator enough
@@ -31,9 +61,11 @@ func NewAllocator(pg plugingetter.PluginGetter) *Allocator {
 	if err != nil {
 		panic("drvregistry.New returned an error... it's not supposed to do that")
 	}
-	return &Allocator{
-		drvRegistry:   reg,
-		portAllocator: port.NewAllocator(),
+	return &allocator{
+		reg:    reg,
+		port:   port.NewAllocator(),
+		ipam:   ipam.NewAllocator(reg),
+		driver: driver.NewAllocator(reg),
 	}
 }
 
@@ -43,7 +75,7 @@ func NewAllocator(pg plugingetter.PluginGetter) *Allocator {
 //
 // If an error occurs during the restore, the local state may be inconsistent,
 // and this allocator should be abandoned
-func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, attachments []*api.NetworkAttachment) error {
+func (a *allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, attachments []*api.NetworkAttachment) error {
 	// first, initialize the default drivers. these are defined in the
 	// driver_[platform].go files, and are platform specific.
 	for _, init := range initializers {
@@ -59,21 +91,26 @@ func (a *Allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 		return err
 	}
 
-	// now, restore the various components
-	a.portAllocator.Restore(endpoints)
+	// now restore the various components
+	// port can never error.
+	a.port.Restore(endpoints)
+	if err := a.ipam.Restore(networks, endpoints, attachments); err != nil {
+		// TODO(dperny): handle errors
+	}
+	if err := a.driver.Restore(networks); err != nil {
+		// TODO(dperny): handle errors
+	}
 }
 
 // Allocate network takes the given network and allocates it to match the
 // provided network spec
-func (a *Allocator) AllocateNetwork(n *api.Network) error {
-	a.networkAllocator.Allocate(n)
+func (a *allocator) AllocateNetwork(n *api.Network) error {
 }
 
-func (a *Allocator) DeallocateNetwork(n *api.Network) error {
-
+func (a *allocator) DeallocateNetwork(n *api.Network) error {
 }
 
-func (a *Allocator) AllocateService(service *api.Service) error {
+func (a *allocator) AllocateService(service *api.Service) error {
 	// handle the cases where service bits are nil
 	endpoint := service.Endpoint
 	if endpoint == nil {
@@ -91,14 +128,32 @@ func (a *Allocator) AllocateService(service *api.Service) error {
 
 	// TODO(dperny) this handles the case of spec.Networks, which we should
 	// deprecate before removing this code entirely
-	var networks []*api.NetworkAttachmentConfig
+	networks := s.Spec.Task.Networks
 	if len(service.Spec.Task.Networks) == 0 && len(service.Spec.Networks != 0) {
 		networks = s.Spec.Networks
 	}
+	ids := make([]string, 0, len(networks))
+	// build up a list of network ids to allocate vips for
+	for _, nw := range networks {
+		ids = append(ids, nw.ID)
+	}
+	if err := a.ipam.AllocateVIPs(endpoint, endpointSpec, ids); err != nil {
+		// TODO(dperny): error handling
+	}
+	proposal.Commit()
+	service.Endpoint.Ports = proposal.Ports()
+	service.Endpoint = endpoint
+	service.Endpoint.Spec = endpointSpec
+
+	return nil
 }
 
-func (a *Allocator) AllocateTask(task *api.Task) error {
+func (a *allocator) AllocateTask(task *api.Task) error {
+	// Task has an endpoint, but that endpoint is just a copy of the service's
+	// endpoint at task creation time. The service might not be up-to-date on
+	// its allocation yet, and this endpoint might not be up-to-date. The end
+	// result is that we're gonna
 }
 
-func (a *Allocator) AllocateNode(node *api.Node) error {
+func (a *allocator) AllocateNode(node *api.Node) error {
 }

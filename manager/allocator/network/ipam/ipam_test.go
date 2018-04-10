@@ -65,6 +65,11 @@ func (m *mockIpam) DiscoverDelete(_ discoverapi.DiscoveryType, _ interface{}) er
 }
 
 func (m *mockIpam) GetDefaultAddressSpaces() (string, string, error) {
+	if m.getDefaultAddressSpacesFunc == nil {
+		// we can return empty strings because we don't actually in the code
+		// look at, care about, or use the return value,
+		return "", "", nil
+	}
 	return m.getDefaultAddressSpacesFunc()
 }
 
@@ -73,6 +78,9 @@ func (m *mockIpam) RequestPool(addressSpace, pool, subpool string, options map[s
 }
 
 func (m *mockIpam) ReleasePool(poolID string) error {
+	if m.releasePoolFunc == nil {
+		return nil
+	}
 	return m.releasePoolFunc(poolID)
 }
 
@@ -81,6 +89,9 @@ func (m *mockIpam) RequestAddress(poolID string, ip net.IP, opts map[string]stri
 }
 
 func (m *mockIpam) ReleaseAddress(poolID string, ip net.IP) error {
+	if m.releaseAddressFunc == nil {
+		return nil
+	}
 	return m.releaseAddressFunc(poolID, ip)
 }
 
@@ -119,14 +130,32 @@ func (m *addressRestorerMockIpam) RequestAddress(_ string, ip net.IP, opts map[s
 
 var _ = Describe("ipam.Allocator", func() {
 	var (
-		reg *mockDrvRegistry
-		a   *Allocator
+		reg  *mockDrvRegistry
+		a    *Allocator
+		ipam *addressRestorerMockIpam
 	)
 	BeforeEach(func() {
 		reg = &mockDrvRegistry{
 			ipams: make(map[string]ipamAndCaps),
 			// add a noop before function so we don't try calling a nil
 			beforeIpam: func() {},
+		}
+		// this is the default ipam we'll use most places, which successfully
+		// "restores" addresses already requested
+		ipam = &addressRestorerMockIpam{
+			&mockIpam{},
+			[]string{},
+			[]struct{ subnet, iprange string }{},
+		}
+		reg.ipams["restore"] = ipamAndCaps{
+			ipam: ipam,
+		}
+		reg.ipams["addressSpaceFails"] = ipamAndCaps{
+			ipam: &mockIpam{
+				getDefaultAddressSpacesFunc: func() (string, string, error) {
+					return "", "", fmt.Errorf("failed")
+				},
+			},
 		}
 		a = NewAllocator(reg)
 	})
@@ -137,6 +166,7 @@ var _ = Describe("ipam.Allocator", func() {
 				wasCalled bool
 			)
 			BeforeEach(func() {
+				wasCalled = false
 				reg.beforeIpam = func() {
 					wasCalled = true
 				}
@@ -249,18 +279,11 @@ var _ = Describe("ipam.Allocator", func() {
 				err error
 			)
 			BeforeEach(func() {
-				reg.ipams["ipam"] = ipamAndCaps{
-					ipam: &mockIpam{
-						getDefaultAddressSpacesFunc: func() (string, string, error) {
-							return "", "", fmt.Errorf("failed")
-						},
-					},
-				}
 				network := &api.Network{
 					ID: "net2",
 					IPAM: &api.IPAMOptions{
 						Driver: &api.Driver{
-							Name: "ipam",
+							Name: "addressSpaceFails",
 						},
 						Configs: []*api.IPAMConfig{
 							{
@@ -271,7 +294,7 @@ var _ = Describe("ipam.Allocator", func() {
 					Spec: api.NetworkSpec{
 						IPAM: &api.IPAMOptions{
 							Driver: &api.Driver{
-								Name: "ipam",
+								Name: "addressSpaceFails",
 							},
 						},
 					},
@@ -281,35 +304,19 @@ var _ = Describe("ipam.Allocator", func() {
 			It("should return ErrBustedIPAM", func() {
 				Expect(err).To(HaveOccurred())
 				Expect(err).To(WithTransform(IsErrBustedIPAM, BeTrue()))
-				Expect(err.Error()).To(Equal("ipam error from driver ipam on network net2: failed"))
+				Expect(err.Error()).To(Equal("ipam error from driver addressSpaceFails on network net2: failed"))
 			})
 		})
 		Context("when objects are fully allocated", func() {
 			var (
-				err  error
-				ipam *addressRestorerMockIpam
+				err error
 			)
 			BeforeEach(func() {
-				ipam = &addressRestorerMockIpam{
-					&mockIpam{
-						getDefaultAddressSpacesFunc: func() (string, string, error) {
-							// we can return empty strings because we don't
-							// actually in the code look at, care about, or use
-							// the return value,
-							return "", "", nil
-						},
-					},
-					[]string{},
-					[]struct{ subnet, iprange string }{},
-				}
-				reg.ipams["ipam"] = ipamAndCaps{
-					ipam: ipam,
-				}
 				network1 := &api.Network{
 					ID: "testID1",
 					IPAM: &api.IPAMOptions{
 						Driver: &api.Driver{
-							Name: "ipam",
+							Name: "restore",
 						},
 						Configs: []*api.IPAMConfig{
 							{
@@ -338,7 +345,7 @@ var _ = Describe("ipam.Allocator", func() {
 					ID: "testID2",
 					IPAM: &api.IPAMOptions{
 						Driver: &api.Driver{
-							Name: "ipam",
+							Name: "restore",
 						},
 						Configs: []*api.IPAMConfig{
 							{
@@ -423,6 +430,568 @@ var _ = Describe("ipam.Allocator", func() {
 					"192.168.2.2",
 					"192.168.2.3",
 				))
+			})
+		})
+	})
+	Describe("allocating new networks", func() {
+		Context("when the network is already allocated", func() {
+			var (
+				network *api.Network
+				err     error
+			)
+			BeforeEach(func() {
+				network = &api.Network{
+					ID: "testID1",
+					IPAM: &api.IPAMOptions{
+						Driver: &api.Driver{
+							Name: "restore",
+						},
+						Configs: []*api.IPAMConfig{
+							{
+								Subnet:  "192.168.1.0/24",
+								Gateway: "192.168.1.1",
+							},
+						},
+					},
+					Spec: api.NetworkSpec{
+						Annotations: api.Annotations{
+							Name: "test1",
+						},
+						DriverConfig: &api.Driver{},
+						IPAM: &api.IPAMOptions{
+							Driver: &api.Driver{
+								Name: "restore",
+							},
+							Configs: []*api.IPAMConfig{
+								{
+									Subnet:  "192.168.1.0/24",
+									Gateway: "192.168.1.1",
+								},
+							},
+						},
+					},
+				}
+				a.Restore([]*api.Network{network}, nil, nil)
+				err = a.AllocateNetwork(network)
+			})
+			It("should return ErrNetworkAllocated", func() {
+				Expect(err).To(HaveOccurred())
+				Expect(err).To(WithTransform(IsErrNetworkAllocated, BeTrue()))
+				Expect(err.Error()).To(Equal("network testID1 is already allocated and network updates are not supported"))
+			})
+		})
+		Describe("a valid, correct allocation", func() {
+			var (
+				poolsRequested     int
+				addressesRequested int
+				mock               *mockIpam
+			)
+			BeforeEach(func() {
+				poolsRequested = 0
+				addressesRequested = 0
+				// provide a mock ipam driver for the network
+				mock = &mockIpam{
+					requestPoolFunc: func(addressSpace, pool, subpool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
+						poolsRequested = poolsRequested + 1
+						return "pool1",
+							&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+							map[string]string{
+								netlabel.Gateway: "192.168.2.1/24",
+							},
+							nil
+					},
+					requestAddressFunc: func(_ string, _ net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
+						addressesRequested = addressesRequested + 1
+						return &net.IPNet{net.IPv4(192, 168, 2, 2), net.IPv4Mask(255, 255, 255, 128)}, nil, nil
+					},
+				}
+				reg.ipams["default"] = ipamAndCaps{mock, nil}
+			})
+			AfterEach(func() {
+				// we need to remove the mock IPAM driver we just created
+				delete(reg.ipams, "default")
+			})
+			Context("when the user has specified no settings", func() {
+				var (
+					network *api.Network
+					err     error
+				)
+				BeforeEach(func() {
+					network = &api.Network{
+						ID: "net1",
+						Spec: api.NetworkSpec{
+							Annotations: api.Annotations{
+								Name: "net1",
+							},
+						},
+					}
+					err = a.AllocateNetwork(network)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should fill in the default driver settings", func() {
+					Expect(network.IPAM).ToNot(BeNil())
+					Expect(network.IPAM.Driver).ToNot(BeNil())
+					Expect(network.IPAM.Driver.Name).To(Equal(ipamapi.DefaultIPAM))
+					Expect(network.IPAM.Configs).To(HaveLen(1))
+					Expect(network.IPAM.Configs[0]).ToNot(BeNil())
+					Expect(network.IPAM.Configs[0].Family).To(Equal(api.IPAMConfig_IPV4))
+					Expect(network.IPAM.Configs[0].Subnet).To(Equal("192.168.2.0/24"))
+					Expect(network.IPAM.Configs[0].Gateway).To(Equal("192.168.2.1"))
+				})
+				It("should not alter the spec", func() {
+					Expect(network.Spec).To(Equal(api.NetworkSpec{
+						Annotations: api.Annotations{
+							Name: "net1",
+						},
+					}))
+				})
+				It("should request 1 pool and no addresses", func() {
+					Expect(poolsRequested).To(Equal(1))
+					Expect(addressesRequested).To(Equal(0))
+				})
+			})
+			Context("when the IPAM driver returns no gateway address", func() {
+				var (
+					network *api.Network
+					err     error
+				)
+				BeforeEach(func() {
+					mock.requestPoolFunc = func(_, _, _ string, _ map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
+						return "pool2",
+							&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+							map[string]string{},
+							nil
+					}
+					network = &api.Network{
+						ID: "net1",
+					}
+					err = a.AllocateNetwork(network)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should request a gateway address for the network", func() {
+					Expect(addressesRequested).To(Equal(1))
+					Expect(network.IPAM).ToNot(BeNil())
+					Expect(network.IPAM.Configs).ToNot(BeEmpty())
+					Expect(network.IPAM.Configs[0]).ToNot(BeNil())
+					Expect(network.IPAM.Configs[0].Subnet).To(Equal("192.168.2.0/24"))
+					Expect(network.IPAM.Configs[0].Gateway).To(Equal("192.168.2.2"))
+				})
+			})
+			Context("when a gateway address is specified by the user", func() {
+				var (
+					addressRequested string
+					network          *api.Network
+					err              error
+				)
+				BeforeEach(func() {
+					addressRequested = ""
+					mock.requestAddressFunc = func(_ string, address net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
+						addressesRequested = addressesRequested + 1
+						addressRequested = address.String()
+						return &net.IPNet{address, address.DefaultMask()}, nil, nil
+					}
+					network = &api.Network{
+						ID: "net1",
+						Spec: api.NetworkSpec{
+							IPAM: &api.IPAMOptions{
+								Configs: []*api.IPAMConfig{
+									{
+										Gateway: "192.168.2.99",
+									},
+								},
+							},
+						},
+					}
+					err = a.AllocateNetwork(network)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should use the spec's gateway address and not the IPAM driver's", func() {
+					Expect(addressRequested).To(Equal("192.168.2.99"))
+					Expect(network.IPAM).ToNot(BeNil())
+					Expect(network.IPAM.Configs).ToNot(BeEmpty())
+					Expect(network.IPAM.Configs[0]).ToNot(BeNil())
+					Expect(network.IPAM.Configs[0].Subnet).To(Equal("192.168.2.0/24"))
+					Expect(network.IPAM.Configs[0].Gateway).To(Equal("192.168.2.99"))
+				})
+			})
+			Context("when specifying an IPAM driver", func() {
+				var (
+					network, nwCopy *api.Network
+					err             error
+					wasCalled       bool
+				)
+				BeforeEach(func() {
+					wasCalled = false
+					mock := &mockIpam{
+						requestPoolFunc: func(addressSpace, pool, subpool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
+							wasCalled = true
+							return "nondefaultpool",
+								&net.IPNet{net.IPv4(192, 168, 10, 0), net.IPv4Mask(255, 255, 255, 0)},
+								map[string]string{
+									netlabel.Gateway: "192.168.10.1/24",
+								},
+								nil
+						},
+					}
+					reg.ipams["nondefault"] = ipamAndCaps{mock, nil}
+					network = &api.Network{
+						ID: "net1",
+						Spec: api.NetworkSpec{
+							Annotations: api.Annotations{
+								Name: "net1",
+							},
+							IPAM: &api.IPAMOptions{
+								Driver: &api.Driver{
+									Name: "nondefault",
+								},
+							},
+						},
+					}
+					nwCopy = network.Copy()
+					err = a.AllocateNetwork(network)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should use the requested ipam driver", func() {
+					Expect(network.IPAM).ToNot(BeNil())
+					Expect(network.IPAM.Driver).ToNot(BeNil())
+					Expect(network.IPAM.Driver.Name).To(Equal("nondefault"))
+					Expect(network.IPAM.Configs).ToNot(BeNil())
+					Expect(network.IPAM.Configs).ToNot(BeEmpty())
+					Expect(network.IPAM.Configs[0].Gateway).To(Equal("192.168.10.1"))
+					Expect(wasCalled).To(BeTrue())
+				})
+			})
+			Context("when specifying IPAM driver options", func() {
+				var (
+					network           *api.Network
+					err               error
+					options           map[string]string
+					calledWithOptions map[string]string
+				)
+				BeforeEach(func() {
+					calledWithOptions = nil
+					options = map[string]string{"foo": "bar", "baz": "bat"}
+					network = &api.Network{
+						ID: "id1",
+						Spec: api.NetworkSpec{
+							IPAM: &api.IPAMOptions{
+								Driver: &api.Driver{
+									Options: options,
+								},
+							},
+						},
+					}
+					mock.requestPoolFunc = func(addressSpace, pool, subpool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
+						calledWithOptions = options
+						poolsRequested = poolsRequested + 1
+						return "pool1",
+							&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+							map[string]string{
+								netlabel.Gateway: "192.168.2.1/24",
+							},
+							nil
+					}
+					err = a.AllocateNetwork(network)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should use the provided options when allocating", func() {
+					Expect(calledWithOptions).To(Equal(options))
+				})
+				It("should fill in the Options field on the IPAM.Driver with the provided options", func() {
+					Expect(network.IPAM).ToNot(BeNil())
+					Expect(network.IPAM.Driver).ToNot(BeNil())
+					Expect(network.IPAM.Driver.Options).To(Equal(options))
+				})
+			})
+		})
+		Describe("a failed request", func() {
+			Context("when passing an invalid ipam", func() {
+				var (
+					network, nwCopy *api.Network
+					err             error
+				)
+				BeforeEach(func() {
+					network = &api.Network{
+						ID: "net1",
+						Spec: api.NetworkSpec{
+							IPAM: &api.IPAMOptions{
+								Driver: &api.Driver{
+									Name: "invalid",
+								},
+							},
+						},
+					}
+					nwCopy = network.Copy()
+					err = a.AllocateNetwork(network)
+				})
+				It("should fail with ErrInvalidIPAM", func() {
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrInvalidIPAM, BeTrue()))
+					Expect(err.Error()).To(Equal("ipam driver invalid for network net1 is not valid"))
+				})
+				It("should not alter the network object", func() {
+					Expect(network).To(Equal(nwCopy))
+				})
+			})
+			Context("when the IPAM driver fails to return an address space", func() {
+				// again, testing this is just... pretty dumb, i don't know why
+				// this function is ALLOWED to fail...
+				var (
+					err error
+				)
+				BeforeEach(func() {
+					net := &api.Network{
+						ID: "net2",
+						Spec: api.NetworkSpec{
+							IPAM: &api.IPAMOptions{
+								Driver: &api.Driver{
+									Name: "addressSpaceFails",
+								},
+							},
+						},
+					}
+					err = a.AllocateNetwork(net)
+				})
+				It("should return ErrBustedIPAM", func() {
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrBustedIPAM, BeTrue()))
+					Expect(err.Error()).To(Equal("ipam error from driver addressSpaceFails on network net2: failed"))
+				})
+			})
+			Context("when the pool request fails", func() {
+				var (
+					wasCalled bool
+					err       error
+				)
+				BeforeEach(func() {
+					wasCalled = false
+					mock := &mockIpam{
+						requestPoolFunc: func(_, _, _ string, _ map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
+							wasCalled = true
+							return "", nil, nil, fmt.Errorf("failed")
+						},
+					}
+					reg.ipams["poolfails"] = ipamAndCaps{mock, nil}
+					err = a.AllocateNetwork(&api.Network{
+						ID: "net1",
+						Spec: api.NetworkSpec{
+							IPAM: &api.IPAMOptions{
+								Driver: &api.Driver{
+									Name: "poolfails",
+								},
+							},
+						},
+					})
+				})
+				AfterEach(func() {
+					delete(reg.ipams, "poolfails")
+				})
+				It("should fail with ErrFailedPoolRequest", func() {
+					Expect(wasCalled).To(BeTrue())
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrFailedPoolRequest, BeTrue()))
+					Expect(err.Error()).To(Equal("requesting pool (subnet: \"\", range: \"\") returned error: failed"))
+				})
+			})
+			Context("when the IPAM driver returns an invalid gateway address", func() {
+				// why is this even possible tho i don't even understand why we
+				// need to check this
+				var (
+					err            error
+					poolsRequested int
+				)
+				BeforeEach(func() {
+					poolsRequested = 0
+					mock := &mockIpam{
+						requestPoolFunc: func(addressSpace, pool, subpool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
+							poolsRequested = poolsRequested + 1
+							return "pool1",
+								&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+								map[string]string{
+									netlabel.Gateway: "notvalid",
+								},
+								nil
+						},
+					}
+					reg.ipams["default"] = ipamAndCaps{mock, nil}
+					network := &api.Network{
+						ID: "net1",
+						Spec: api.NetworkSpec{
+							Annotations: api.Annotations{
+								Name: "net1",
+							},
+						},
+					}
+					err = a.AllocateNetwork(network)
+				})
+				AfterEach(func() {
+					delete(reg.ipams, "default")
+				})
+				It("should return ErrBustedIPAM", func() {
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrBustedIPAM, BeTrue()))
+					Expect(err.Error()).To(Equal("ipam error from driver default on network net1: can't parse gateway address (notvalid) returned by the ipam driver: invalid CIDR address: notvalid"))
+				})
+			})
+			Context("when requesting a gateway address fails", func() {
+				var (
+					err error
+				)
+				BeforeEach(func() {
+					mock := &mockIpam{
+						requestPoolFunc: func(_, _, _ string, _ map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
+							return "pool1",
+								&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+								map[string]string{
+									netlabel.Gateway: "192.168.2.1/24",
+								},
+								nil
+						},
+						requestAddressFunc: func(_ string, _ net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
+							return nil, nil, fmt.Errorf("failed")
+						},
+					}
+					reg.ipams["default"] = ipamAndCaps{mock, nil}
+					err = a.AllocateNetwork(&api.Network{
+						ID: "id1",
+						Spec: api.NetworkSpec{
+							IPAM: &api.IPAMOptions{
+								Configs: []*api.IPAMConfig{
+									{
+										Gateway: "192.168.2.11",
+									},
+								},
+							},
+						},
+					})
+				})
+				AfterEach(func() {
+					delete(reg.ipams, "default")
+				})
+				It("should return ErrFailedAddressRequest", func() {
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
+					Expect(err.Error()).To(Equal("requesting address 192.168.2.11 failed: failed"))
+				})
+			})
+			Context("when multiple configs are specified, and a later one fails", func() {
+				var (
+					mock                             *mockIpam
+					network, nwCopy                  *api.Network
+					poolsReleased, addressesReleased int
+					err                              error
+				)
+				BeforeEach(func() {
+					poolsReleased = 0
+					addressesReleased = 0
+					var i byte = 0
+					mock = &mockIpam{
+						requestPoolFunc: func(_, _, _ string, _ map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
+							i = i + 1
+							return fmt.Sprintf("pool%v", i),
+								&net.IPNet{net.IPv4(192, 168, i, 0), net.IPv4Mask(255, 255, 255, 0)},
+								map[string]string{
+									netlabel.Gateway: fmt.Sprintf("192.168.%v.1/24", i),
+								},
+								nil
+						},
+						requestAddressFunc: func(_ string, _ net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
+							return nil, nil, fmt.Errorf("failed")
+						},
+						releasePoolFunc: func(_ string) error {
+							poolsReleased = poolsReleased + 1
+							return nil
+						},
+						releaseAddressFunc: func(_ string, _ net.IP) error {
+							addressesReleased = addressesReleased + 1
+							return nil
+						},
+					}
+					reg.ipams["default"] = ipamAndCaps{mock, nil}
+					// we're going to force this behavior by not allocating a
+					// gateway for the first config, but allocating one for
+					// the second config. that will cause ipam.RequestAddress
+					// to run in the second loop iteration, which will return
+					// an error
+					network = &api.Network{
+						ID: "id1",
+						Spec: api.NetworkSpec{
+							IPAM: &api.IPAMOptions{
+								Configs: []*api.IPAMConfig{
+									{
+										Family: api.IPAMConfig_IPV4,
+									},
+									{
+										Gateway: "192.168.2.108",
+									},
+								},
+							},
+						},
+					}
+					nwCopy = network.Copy()
+				})
+				// using JustBeforeEach here so we can check the sub-cases of
+				// double faults
+				JustBeforeEach(func() {
+					err = a.AllocateNetwork(network)
+				})
+				It("should fail with ErrFailedAddressRequest", func() {
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
+				})
+				It("should not alter the network object", func() {
+					Expect(network).To(Equal(nwCopy))
+				})
+				It("should the release 2 pools", func() {
+					Expect(poolsReleased).To(Equal(2))
+				})
+				It("should release 1 address", func() {
+					Expect(addressesReleased).To(Equal(1))
+				})
+				Context("when a double fault occurs releasing pools", func() {
+					BeforeEach(func() {
+						mock.releasePoolFunc = func(_ string) error {
+							return fmt.Errorf("failed")
+						}
+					})
+					It("should fail with ErrDoubleFault", func() {
+						Expect(err).To(HaveOccurred())
+						Expect(err).To(WithTransform(IsErrDoubleFault, BeTrue()))
+						Expect(err.Error()).To(Equal(
+							"double fault: an error occurred while handling error requesting address 192.168.2.108 failed: failed: failed"))
+						e := err.(ErrDoubleFault)
+						Expect(e.Original()).ToNot(BeNil())
+						Expect(e.Original()).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
+						Expect(e.New()).ToNot(BeNil())
+						Expect(e.New()).To(Equal(fmt.Errorf("failed")))
+					})
+				})
+				Context("when a double fault occurs releasing addresses", func() {
+					BeforeEach(func() {
+						mock.releaseAddressFunc = func(_ string, _ net.IP) error {
+							return fmt.Errorf("failed")
+						}
+					})
+					It("should fail with ErrDoubleFault", func() {
+						Expect(err).To(HaveOccurred())
+						Expect(err).To(WithTransform(IsErrDoubleFault, BeTrue()))
+						e := err.(ErrDoubleFault)
+						Expect(e.Original()).ToNot(BeNil())
+						Expect(e.Original()).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
+						Expect(e.New()).ToNot(BeNil())
+						Expect(e.New()).To(Equal(fmt.Errorf("failed")))
+					})
+				})
 			})
 		})
 	})

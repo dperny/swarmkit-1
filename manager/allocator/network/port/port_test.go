@@ -13,7 +13,7 @@ import (
 
 var _ = Describe("port.Allocator", func() {
 	var (
-		pa *Allocator
+		pa Allocator
 	)
 
 	BeforeEach(func() {
