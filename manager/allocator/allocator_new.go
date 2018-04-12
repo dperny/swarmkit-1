@@ -156,6 +156,37 @@ func Run(ctx context.Context) error {
 
 	// this goroutine handles incoming work.
 	go func() {
+		// This routine is... pretty non-optimal. It'll probably have to be
+		// optmizied before we can ever ship. It grabs a write lock on the raft
+		// database for every allocation, serially.
+		//
+		// In addition, there are some pitfalls related to dependencies. The
+		// pass through the work pool means that the order of pending
+		// allocations is randomized. We might try to allocate an attachment,
+		// for example, before its network has been allocated. Normally, this
+		// isn't problem, but
+		//
+		// Some ideas for optimizations:
+		// - Batch allocations. Follow the pattern in other components of only
+		//   doing operations after a time or size threshold has been reached.
+		// - Do read-copy-update. Because we totally own the network fields, as
+		//   long as the object still exists before we write it, and is still
+		//   in a desired state requiring allocation, we're fine to have other
+		//   components operate on it. The downside is we don't really have
+		//   control over what happens in the meantime
+		// - Lazy allocate. Only watch for updates on Tasks and Nodes. Before
+		//   we allocate a task or node, make sure that its dependent network
+		//   and service objects are fully allocated.
+		// - Batch-allocate tasks. If we get a create event for a task, grab
+		//   all of the other new tasks for the service and allocate them all
+		//   at once in the same transaction (or batch them in separate
+		//   transactions).
+		// Some more far-fetched ideas:
+		// - Upgradeable locking in transactions?
+		//
+		// The nice part about all of these ideas is that they're entirely
+		// under the purview of THIS object. you don't have to go diving
+		// through the code making a bunch of changes along the way.
 		for {
 			select {
 			case <-ctx.Done():

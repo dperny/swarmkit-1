@@ -130,9 +130,9 @@ func (m *addressRestorerMockIpam) RequestAddress(_ string, ip net.IP, opts map[s
 
 var _ = Describe("ipam.Allocator", func() {
 	var (
-		reg  *mockDrvRegistry
-		a    *Allocator
-		ipam *addressRestorerMockIpam
+		reg      *mockDrvRegistry
+		a        Allocator
+		restorer *addressRestorerMockIpam
 	)
 	BeforeEach(func() {
 		reg = &mockDrvRegistry{
@@ -142,13 +142,13 @@ var _ = Describe("ipam.Allocator", func() {
 		}
 		// this is the default ipam we'll use most places, which successfully
 		// "restores" addresses already requested
-		ipam = &addressRestorerMockIpam{
+		restorer = &addressRestorerMockIpam{
 			&mockIpam{},
 			[]string{},
 			[]struct{ subnet, iprange string }{},
 		}
 		reg.ipams["restore"] = ipamAndCaps{
-			ipam: ipam,
+			ipam: restorer,
 		}
 		reg.ipams["addressSpaceFails"] = ipamAndCaps{
 			ipam: &mockIpam{
@@ -412,15 +412,15 @@ var _ = Describe("ipam.Allocator", func() {
 				Expect(err).ToNot(HaveOccurred())
 			})
 			It("should have requested 2 pools", func() {
-				Expect(ipam.pools).To(HaveLen(2))
-				Expect(ipam.pools[0].subnet).To(Equal("192.168.1.0/24"))
-				Expect(ipam.pools[0].iprange).To(Equal(""))
-				Expect(ipam.pools[1].subnet).To(Equal("192.168.2.0/24"))
-				Expect(ipam.pools[1].iprange).To(Equal(""))
+				Expect(restorer.pools).To(HaveLen(2))
+				Expect(restorer.pools[0].subnet).To(Equal("192.168.1.0/24"))
+				Expect(restorer.pools[0].iprange).To(Equal(""))
+				Expect(restorer.pools[1].subnet).To(Equal("192.168.2.0/24"))
+				Expect(restorer.pools[1].iprange).To(Equal(""))
 			})
 			It("should have requested all of the IP address", func() {
-				Expect(ipam.addresses).To(HaveLen(8))
-				Expect(ipam.addresses).To(ConsistOf(
+				Expect(restorer.addresses).To(HaveLen(8))
+				Expect(restorer.addresses).To(ConsistOf(
 					"192.168.1.1gateway",
 					"192.168.2.1gateway",
 					"192.168.1.2",
@@ -990,6 +990,214 @@ var _ = Describe("ipam.Allocator", func() {
 						Expect(e.Original()).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
 						Expect(e.New()).ToNot(BeNil())
 						Expect(e.New()).To(Equal(fmt.Errorf("failed")))
+					})
+				})
+			})
+		})
+	})
+
+	Describe("allocating VIPs and Attachments", func() {
+		var (
+			addressesAllocated int
+			// addressesReleased contains all of the addresses released and
+			// their pool IDs
+			addressesReleased map[string]net.IP
+		)
+		BeforeEach(func() {
+			addressesAllocated = 0
+			addressesReleased = map[string]net.IP{}
+
+			// set up some networks and mocks. allocating VIPs and attachments
+			// requires a lot more dependent state than allocating Networks
+			// does, so we'll set it all up here. We can call Restore any
+			// number of times, so it doesn't matter if a later test calls
+			// Restore again
+			networks := []*api.Network{
+				{
+					ID: "nw1",
+					IPAM: &api.IPAMOptions{
+						Driver: &api.Driver{
+							Name: ipamapi.DefaultIPAM,
+						},
+						Configs: []*api.IPAMConfig{
+							{
+								Subnet:  "192.168.0.1/24",
+								Range:   "192.168.0.1/24",
+								Gateway: "192.168.0.1",
+							},
+							{
+								Subnet:  "192.168.1.1/24",
+								Range:   "192.168.1.1/24",
+								Gateway: "192.168.1.1",
+							},
+						},
+					},
+				},
+				{
+					ID: "nw2",
+					IPAM: &api.IPAMOptions{
+						Driver: &api.Driver{
+							Name:    ipamapi.DefaultIPAM,
+							Options: map[string]string{"foo": "bar"},
+						},
+						Configs: []*api.IPAMConfig{
+							{
+								Subnet:  "192.168.2.1/24",
+								Range:   "192.168.2.1/24",
+								Gateway: "192.168.2.1",
+							},
+						},
+					},
+				},
+			}
+			// make a mock IPAM driver that can allocate new addresses.
+			mockDefaultIpam := &mockIpam{
+				requestAddressFunc: func(_ string, addr net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
+					// it doesn't matter if the address is literally anywhere
+					// near correct or real. we don't have to reproduce the
+					// actual behavior of an IPAM driver. the only behavior
+					// that actually matters is returning valid IP addresses
+					// that are different from one another
+					ip := net.IPv4(192, 168, 3, byte(addressesAllocated))
+					addressesAllocated = addressesAllocated + 1
+					return &net.IPNet{ip, ip.DefaultMask()}, nil, nil
+				},
+				releaseAddressFunc: func(pool string, addr net.IP) error {
+					addressesReleased[pool] = addr
+					return nil
+				},
+			}
+
+			// swap out the default mock IPAM for the restorer mock IPAM for
+			// just long enough to restore all of this
+			reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{restorer, nil}
+			defer func() {
+				reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{mockDefaultIpam, nil}
+			}()
+			a.Restore(networks, nil, nil)
+		})
+		Describe("allocating vips", func() {
+			Context("when a requested network is not yet allocated", func() {
+				var err error
+				BeforeEach(func() {
+					e := &api.Endpoint{}
+					err = a.AllocateVIPs(e, []string{"notreal"})
+				})
+				It("should fail with ErrNetworkNotAllocated", func() {
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrNetworkNotAllocated, BeTrue()))
+					Expect(err.Error()).To(Equal("network notreal is not allocated"))
+				})
+			})
+			Context("to a new endpoint", func() {
+				var (
+					endpoint *api.Endpoint
+					err      error
+				)
+				BeforeEach(func() {
+					endpoint = &api.Endpoint{}
+					err = a.AllocateVIPs(endpoint, []string{"nw1", "nw2"})
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should add VIPs to the endpoint", func() {
+					Expect(endpoint.VirtualIPs).ToNot(BeNil())
+					Expect(endpoint.VirtualIPs).To(HaveLen(2))
+					Expect(endpoint.VirtualIPs).To(ConsistOf(
+						&api.Endpoint_VirtualIP{"nw1", "192.168.3.0/24"},
+						&api.Endpoint_VirtualIP{"nw2", "192.168.3.1/24"},
+					))
+				})
+				It("should have allocated 2 addresses", func() {
+					Expect(addressesAllocated).To(Equal(2))
+				})
+			})
+			Context("when updating the attached networks", func() {
+				var (
+					endpoint *api.Endpoint
+				)
+				BeforeEach(func() {
+					endpoint = &api.Endpoint{
+						VirtualIPs: []*api.Endpoint_VirtualIP{
+							{
+								NetworkID: "nw1",
+								Addr:      "192.168.0.2/24",
+							},
+						},
+					}
+					// swap out the restorer ipam for a second
+					def := reg.ipams[ipamapi.DefaultIPAM]
+					reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{restorer, nil}
+					defer func() {
+						reg.ipams[ipamapi.DefaultIPAM] = def
+					}()
+					a.Restore(nil, []*api.Endpoint{endpoint}, nil)
+				})
+				Context("to add more networks", func() {
+					var (
+						err error
+					)
+					BeforeEach(func() {
+						err = a.AllocateVIPs(endpoint, []string{"nw1", "nw2"})
+					})
+					It("should succeed", func() {
+						Expect(err).ToNot(HaveOccurred())
+					})
+					It("should add one vip to the endpoint", func() {
+						Expect(addressesAllocated).To(Equal(1))
+						Expect(endpoint.VirtualIPs).ToNot(BeNil())
+						Expect(endpoint.VirtualIPs).To(HaveLen(2))
+						Expect(endpoint.VirtualIPs).To(ConsistOf(
+							&api.Endpoint_VirtualIP{"nw1", "192.168.0.2/24"},
+							&api.Endpoint_VirtualIP{"nw2", "192.168.3.0/24"},
+						))
+					})
+				})
+				Context("to remove a network", func() {
+					var (
+						err error
+					)
+					BeforeEach(func() {
+						err = a.AllocateVIPs(endpoint, []string{})
+					})
+					It("should succeed", func() {
+						Expect(err).ToNot(HaveOccurred())
+					})
+					It("should deallocate 1 address", func() {
+						Expect(endpoint.VirtualIPs).To(HaveLen(0))
+						Expect(addressesReleased).To(HaveLen(1))
+						// NOTE(dperny): this is pretty sloppy because i'm
+						// relying on the fact that I know this IP address
+						// belongs to pool 1 because i know how the
+						// addressRestorerMockIpam works
+						Expect(addressesReleased).To(HaveKey("2"))
+						addr, _, _ := net.ParseCIDR("192.168.0.2/24")
+						Expect(addressesReleased["2"]).To(Equal(addr))
+					})
+				})
+				Context("to both add and remove a network", func() {
+					var (
+						err error
+					)
+					BeforeEach(func() {
+						err = a.AllocateVIPs(endpoint, []string{"nw2"})
+					})
+					It("should succeed", func() {
+						Expect(err).ToNot(HaveOccurred())
+					})
+					It("should add one vip to the endpoint", func() {
+						Expect(addressesAllocated).To(Equal(1))
+						Expect(endpoint.VirtualIPs).To(HaveLen(1))
+						Expect(endpoint.VirtualIPs).To(ConsistOf(
+							&api.Endpoint_VirtualIP{"nw2", "192.168.3.0/24"},
+						))
+					})
+					It("should deallocate one vip", func() {
+						Expect(addressesReleased).To(HaveLen(1))
+						Expect(addressesReleased).To(HaveKey("2"))
+						addr, _, _ := net.ParseCIDR("192.168.0.2/24")
+						Expect(addressesReleased["2"]).To(Equal(addr))
 					})
 				})
 			})
