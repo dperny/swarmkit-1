@@ -281,7 +281,10 @@ func (a *allocator) restoreAddress(nwid string, address string) error {
 }
 
 // AllocateNetwork allocates the IPAM pools for the given network. The network
-// must not be nil, and must not use a node-local driver
+// must not be nil, and must not use a node-local driver.
+//
+// We can't use a node-lcal driver, because we don't have access to the
+// network's driver information. We only have acccess to the IPAM driver.
 func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 	// check if this network is already being managed and return an error if it
 	// is. networks are immutable and cannot be updated.
@@ -295,16 +298,24 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 	if n.Spec.IPAM != nil && n.Spec.IPAM.Driver != nil && n.Spec.IPAM.Driver.Name != "" {
 		ipamName = n.Spec.IPAM.Driver.Name
 	}
+	ipam, _ := a.drvRegistry.IPAM(ipamName)
+	if ipam == nil {
+		return ErrInvalidIPAM{ipamName, n.ID}
+	}
+
 	// make sure here that ipamOpts is not nil so we don't need to nil check it
 	// everywhere later
 	ipamOpts := map[string]string{}
 	if n.Spec.IPAM != nil && n.Spec.IPAM.Driver != nil && n.Spec.IPAM.Driver.Options != nil {
 		ipamOpts = n.Spec.IPAM.Driver.Options
 	}
-
-	ipam, _ := a.drvRegistry.IPAM(ipamName)
-	if ipam == nil {
-		return ErrInvalidIPAM{ipamName, n.ID}
+	// if the IPAM serial allocation option has not been explicitly set one
+	// way or another, set it here. this (roughly speaking) encourages IPAM to
+	// prefer allocating addresses that haven't been recently freed, mitigating
+	// (but not eliminating) some issues with objects being deleted before
+	// they've fully finished terminating.
+	if _, ok := ipamOpts[ipamapi.AllocSerialPrefix]; !ok {
+		ipamOpts[ipamapi.AllocSerialPrefix] = "true"
 	}
 
 	_, addressSpace, err := ipam.GetDefaultAddressSpaces()
@@ -426,12 +437,165 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 	return nil
 }
 
+// DeallocateNetwork takes a network that has been allocated, and releases all
+// of the IPAM resource associated with it.
 func (a *allocator) DeallocateNetwork(network *api.Network) error {
-	return nil
+	local, ok := a.networks[network.ID]
+	if !ok {
+		// usually the caller can ignore this error
+		return ErrNetworkNotAllocated{network.ID}
+	}
+
+	// we know, because we allocated this network, that its IPAM field is fully
+	// allocated, and we can use it without nil checking
+	ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
+
+	for _, config := range local.nw.IPAM.Configs {
+		// these things can return errors, but we literally can't do anything
+		// about it if they do, so just ignore it.
+		ipam.ReleaseAddress(local.pools[config.Subnet], net.ParseIP(config.Gateway))
+		ipam.ReleasePool(local.pools[config.Subnet])
+	}
+	delete(a.networks, network.ID)
 }
 
-// AllocateVIPs allocates the VIPs for the provided endpoint and spec
-func (a *allocator) AllocateVIPs(endpoint *api.Endpoint, spec *api.EndpointSpec, networkIDs []string) error {
+// AllocateVIPs allocates the VIPs for the provided endpoint and network ids.
+// The provided endpoint must have resolution mode VIP, not DNSRR. If the mode
+// of an endpoint changes from ResolutionModeVirtualIP to
+// ResolutionModeDNSRoundRobin, call DeallocateVIPs on the endpoint
+func (a *allocator) AllocateVIPs(endpoint *api.Endpoint, networkIDs []string) (rerr error) {
+	// first, go through and check that every network we want a VIP for is
+	// allocated. if not, return an error. We can't allocate VIPs until the
+	// network is allocated
+	for _, nwid := range networkIDs {
+		if _, ok := a.networks[nwid]; !ok {
+			return ErrNetworkNotAllocated{nwid}
+		}
+	}
+
+	// now compute the changes
+	allocate := []string{}
+	// keep is the set of all virtual IPs we'll retain between the previous and
+	// current spec. we make it with a capacity the same as the current vips
+	// because typically, the vips in use won't change much, and we can avoid
+	// allocation by using this as a guess
+	keep := make([]*api.Endpoint_VirtualIP, 0, len(endpoint.VirtualIPs))
+	deallocate := []*api.Endpoint_VirtualIP{}
+	// first, we need to figure out if any virtual IPs are being removed
+	// continues are bad and hard to follow, so here's the plain english
+	// explanation:
+	// for every VIP currently allocated
+	//     go through the list of desired network IDs
+	//         if a network ID matches the ID on the VIP
+	//             then we're keeping this vip, so add it to the keep list and
+	//             go to the next VIPs, skipping the bottom of this loop
+	//     if we get to this point, then we have been through every desired
+	//     network ID and not found one matching the one on this VIP, so we
+	//     can add it to the list of VIPs to deallocate
+vips:
+	for _, vip := range endpoint.VirtualIPs {
+		for _, nwid := range networkIDs {
+			if vip.NetworkID == nwid {
+				continue vips
+				keep = append(keep, vip)
+			}
+		}
+		deallocate = append(deallocate, vip)
+	}
+
+	// now figure out which new network IDs we've added, which is the same loop
+	// above but swapped around to check network IDs against VIPs
+newvips:
+	for _, nwid := range networkIDs {
+		for _, vip := range endpoint.VirtualIPs {
+			if vip.NetworkID == nwid {
+				continue newvips
+			}
+		}
+		allocate = append(allocate, nwid)
+	}
+
+	// now deallocate the old vips, and allocate the new ones
+	for _, vip := range deallocate {
+		// we know the network is allocated, because we allocated it, and
+		// because the higher levels won't allow the deletion of a network
+		// which still has resources attached, so no need to check ok
+		local := a.networks[vip.NetworkID]
+		// get the IPAM driver for this network. no need to check that the fi
+		ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver)
+		// we don't need to check that the IPAM driver is non-nil because the
+		// network being successfully allocated indicates that it is not. If it
+		// is nil, we should probably crash the program anyway cause that's not
+		// right
+
+		// not sure why we use ParseCIDR instead of ParseIP, because it doesn't
+		// seem like a VIP should be able to be in CIDR notation, but that's
+		// what the old allocator did so I'm going with it.
+		//
+		// we definitely don't need to check err though, because we set this
+		// value to begin with. if we inherited some bogus value from an old
+		// iteration of the allocator, we would have errored out on restore
+		// anyway
+		ip, _, _ := net.ParseCIDR(vip.Addr)
+		poolID := local.endpoints[vip.Addr]
+		// remove the address from the endpoints map, because we've deallocated
+		// it.
+		delete(local.endpoints, vip.Addr)
+		// ReleaseAddress can return an error...  but look, how on earth do we
+		// get a dang error RELEASING an address?  that doesn't even make SENSE
+		// to me. i'm ignoring it, just let the program crash if that happens.
+		// I don't care what IPAM does after we call release. worst case, we
+		// get back to a consistent state on the next leadership change
+		ipam.ReleaseAddress(poolID, ip)
+	}
+
+	// create a new slice to hold the vips we're allocating now
+	newVips := make([]*Endpoint_VirtualIP, 0, len(allocate))
+allocateLoop:
+	for _, nwid := range allocate {
+		// we already verified that every one of the requested networks
+		// existed, so again, no need to check ok
+		local := a.networks[nwid]
+		// we don't need to nil check any of the intermediate fields. we made
+		// them we we know they're filled in
+		ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver)
+		opts := local.nw.IPAM.Driver.Options
+		// the network may have several pools of IP addresses, and some of them
+		// may be full, so we need to try allocation on every pool available
+		// for the network until we find a pool that succeeds.
+		for _, poolID := range local.pools {
+			// passing emptystring for the second args indicates that we don't
+			// have any particular address in mind to allocate
+			ip, _, err := ipam.RequestAddress(poolID, "", opts)
+			// if there's no error, we have a valid address and we're done
+			if err == nil {
+				// add it to the endpoints map so we can figure out what pool
+				// it belongs to when we deallocate
+				local.endpoints[ip.String()] = poolID
+				// add a new VIP object to our slice
+				newVips = append(newVips, &api.Endpoint_VirtualIP{
+					NetworkID: nwid,
+					Addr:      ip.String(),
+				})
+				// continue allocate loop, to skip the error handling that
+				// occurs when ever pool has been exhausted
+				continue allocateLoop
+			}
+			// if we get ErrNoAvailableIPs, it means this pool is already full,
+			// and we'll go on to the next one. if we get any other error,
+			// that's fatal, so we'll return it and clean up
+			if err != ipamapi.ErrNoAvailableIPs {
+				return ErrFailedAddressRequest{"new", err}
+			}
+		}
+		// if we get here, that means we've tried every pool on the network,
+		// and all of them are exhausted
+		return ErrFailedAddressRequest{"new", ipamapi.ErrNoAvailableIPs}
+	}
+
+	// now we've allocated every new vip. Add them all to our held over VIPs,
+	// and return nil
+	endpoint.VirtualIPs = append(keep, newVips...)
 	return nil
 }
 

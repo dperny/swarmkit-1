@@ -1,5 +1,21 @@
 package network
 
+// ErrNoop is returned if Allocate is called on an object that is already
+// allocated and there is nothing to do. It indicates that the caller does not
+// need to retry allocation or save the results, as the object is unmodified.
+type ErrNoop struct {
+	message string
+}
+
+func (e ErrNoop) Error() string {
+	return e.message
+}
+
+func IsErrNoop(e error) bool {
+	_, ok := e.(ErrNoop)
+	return ok
+}
+
 // ErrorIsRetryable is an interface that errors in this package may fulfill. If
 // an error is of type ErrorIsRetryable, it indicates that whatever failure
 // occured isn't due to any misconfiguration, but its due to some state failure

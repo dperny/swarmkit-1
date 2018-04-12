@@ -18,7 +18,7 @@ type DrvRegistry interface {
 }
 
 type Allocator interface {
-	Restore([]*api.Network, []*api.Endpoint, []*api.NetworkAttachment) error
+	Restore([]*api.Network, []*api.Service, []*api.Task, []*api.Node) error
 
 	AllocateNetwork(*api.Network) error
 	DeallocateNetwork(*api.Network) error
@@ -75,7 +75,7 @@ func NewAllocator(pg plugingetter.PluginGetter) Allocator {
 //
 // If an error occurs during the restore, the local state may be inconsistent,
 // and this allocator should be abandoned
-func (a *allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, attachments []*api.NetworkAttachment) error {
+func (a *allocator) Restore(networks []*api.Network, servoices []*api.Service, tasks []*api.Task, nodes []*api.Node) error {
 	// first, initialize the default drivers. these are defined in the
 	// driver_[platform].go files, and are platform specific.
 	for _, init := range initializers {

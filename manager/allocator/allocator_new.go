@@ -19,6 +19,21 @@ const (
 	BatchTimeThreshold = 100 * time.Millisecond
 )
 
+type apiobj int
+
+const (
+	_ apiobj = iota
+	networkObj
+	serviceObj
+	taskObj
+	nodeObj
+)
+
+type pendingAllocation struct {
+	obj apiobj
+	id  string
+}
+
 type Allocator struct {
 	store   *store.MemoryStore
 	network network.Allocator
@@ -32,40 +47,46 @@ func New(store *store.MemoryStore, pg plugingetter.PluginGetter) *Allocator {
 }
 
 func Run(ctx context.Context) error {
+	// General overview of how this function works:
+	//
+	// Run is a shim between the asynchronous store interface, and the
+	// synchronous allocator interface. It uses a map to keep track of which
+	// objects have outstanding allocations to perform, and uses a goroutine to
+	// synchronize reads and writes with this map and allow it to function as a
+	// a source of work.
+	//
+	// The first thing it does is read the object store and pass all of the
+	// objects currently available to the network allocator. The network
+	// allocator's restore function will add all allocated objects to the local
+	// state so we can proceed with new allocations.
+	//
+	// It thens adds all objects in the store to the working set, so that any
+	// objects currently in the store that aren't allocated can be.
+	//
+	// Then, it starts up two major goroutines:
+	//
+	// The first is the goroutine that gets object ids out of the work pile and
+	// performs allocation on them. If the allocation succeeds, it writes that
+	// allocation to raft. If it doesn't succeed, the object is added back to
+	// the work pile to be serviced later
+	//
+	// The second is the goroutine that services events off the event queue. It
+	// reads incoming store events and grabs just the ID and object type, and
+	// adds that to the work pile. We only deal with the ID, not the full
+	// object because the full object may have changed since the event came in
+	// The exception in this event loop is for deallocations. When an object is
+	// deleted, the event we recieve is our last chance to deal with that
+	// object. In that case, we immediately call into Deallocate.
+
 	ctx, c := context.WithCancel(ctx)
 	// defer canceling the context, so that anything waiting on it will exit
 	// when this routine exits.
 	defer c()
 
+	// pending allocations
+	pendingAllocationsIn, pendingAllocationsOut := workQueue(ctx)
+
 	ctx = log.WithModule(ctx, "allocator")
-	// Here's the approach we're taking in Run:
-	//
-	// Step 1: Get the object store, get all of the networky bits out, and call
-	// Restore on the network allocator to bootstrap its state.
-	//
-	// Step 2: Put every object into the pending map, so that we'll go and
-	// reconcile all of the existing objects first. We don't know if the state
-	// of the objects we have currently matches the desired state of those,
-	// objects and there may be outstanding work left from the previous
-	// allocator
-	//
-	// Step 3: Start reading off of the event stream and allocating new objects
-	// as the come in
-
-	// pending maps: these maps keep track of the latest version of all objects
-	// that are awaiting allocation. basically, if stuff is flying off the
-	// event stream at a really high rate, these maps let us discard an older
-	// version of an object if we haven't allocated it yet when a newer version
-	// comes in
-	pendingNetworks := map[string]struct{}{}
-	pendingNetworkCond := sync.NewCond(&sync.Mutex{})
-	pendingServices := map[string]struct{}{}
-	pendingServicesCond := sync.NewCond(&sync.Mutex{})
-	pendingTasks := map[string]struct{}{}
-	pendingTasksCond := sync.NewCond(&sync.Mutex{})
-	pendingNodes := map[string]struct{}{}
-	pendingNodesCond := sync.NewCond(&sync.Mutex{})
-
 	watch, cancel, err := store.ViewAndWatch(store,
 		func(tx store.ReadTx) error {
 			networks, err := store.FindNetworks(tx, store.All)
@@ -80,22 +101,27 @@ func Run(ctx context.Context) error {
 			if err != nil {
 				// TODO(dperny): handle errors
 			}
+			nodes, err := store.FindNodes(tx, store.All)
+			if err != nil {
+				// TODO(dperny): handle errors
+			}
+
+			if err := a.network.Restore(networks, services, tasks, nodes); err != nil {
+				// TODO(dperny): handle errors
+			}
+			for _, network := range networks {
+				pendingAllocationsIn <- pendingAllocation{networkObj, network.ID}
+			}
 			endpoints := make([]*api.Endpoint, 0, len(services))
 			for _, service := range services {
-				if service.Endpoint != nil {
-					endpoints = append(endpoints, service.Endpoint)
-				}
+				pendingAllocationsIn <- pendingAllocation{serviceObj, service.ID}
 			}
 			attachments := []*api.NetworkAttachment{}
 			for _, task := range tasks {
-				for _, attach := range task.Networks {
-					attachments = append(attachments, attach)
-				}
+				pendingAllocationsIn <- pendingAllocation{taskObj, task.ID}
 			}
 			for _, node := range nodes {
-				for _, attach := range node.Attachments {
-					attachments = append(attachments, attach)
-				}
+				pendingAllocationsIn <- pendingAllocation{nodeObj, node.ID}
 			}
 			if err := a.network.Restore(networks, endpoints, attachments); err != nil {
 				// TODO(dperny) error handling
@@ -125,41 +151,78 @@ func Run(ctx context.Context) error {
 		case <-ctx.Done():
 			// cancel the event stream and wake all of the waiting goroutines
 			cancel()
-			pendingNetworksCond.Broadcast()
-			pendingTasksCond.Broadcast()
-			pendingServicesCond.Broadcast()
-			pendingNodesCond.Broadcast()
 		}
 	}()
 
-	// TODO(dperny): define what our signal is going to be be. batch size?
-	// time?
-	var batchSizeSignal <-chan struct{}
-	// set up the batch processor
+	// this goroutine handles incoming work.
 	go func() {
-		batchTicker := time.NewTicker(BatchTimeThreshold)
-		defer batchTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-batchTicker.C:
-			case <-batchSizeSignal:
+			case pending := <-pendingAllocationsOut:
+				// TODO(dperny): what happens if the raft write fails??? we
+				// need to roll back an allocation?
+				if err := store.Update(func(tx store.Tx) {
+					switch pending.obj {
+					case networkObj:
+						n := store.GetNetwork(tx, pending.id)
+						if n == nil {
+							return nil
+						}
+						if err := a.network.AllocateNetwork(n); err != nil {
+							// TODO(dperny): better error handling
+							return err
+						}
+						return store.UpdateNetwork(tx, n)
+					case serviceObj:
+						s := store.GetService(tx, pending.id)
+						if s == nil {
+							return nil
+						}
+						if err := a.network.AllocateService(s); err != nil {
+							return err
+						}
+						return store.UpdateService(tx, s)
+					case taskObj:
+						t := store.GetTask(tx, pending.id)
+						if t == nil {
+							return nil
+						}
+						if err := a.network.AllocateTask(t); err != nil {
+							return err
+						}
+						return store.UpdateTask(tx, s)
+					case nodeObj:
+						n := store.GetNode(tx, pending.id)
+						if n == nil {
+							return nil
+						}
+						if err := a.network.AllocateNode(n); err != nil {
+							return err
+						}
+						return store.UpdateNode(tx, n)
+					}
+				}); err != nil {
+					// don't block on waiting for pendingAllocations to recieve
+					// this allocation
+					select {
+					case <-ctx.Done():
+						return
+					case pendingAllocationsIn <- pending:
+					}
+				}
 			}
 		}
 	}()
 
-	// this function watches the event stream for incoming updates. It doesn't
-	// keep the object around, though, because by the time we're ready to
-	// service it, the object may have been updated again. instead, it does a
-	// bare minimum of filtering, quickly grabs the object ID, and writes that
-	// out to another channel.
-	//
-	// the exception is for deletions. when a deletion comes in, we don't have
-	// any choice but to deallocated it. the deallocation is strictly a
-	// bookkeeping step, for keeping internal state consistent.
+	// this goroutine handles incoming store events. all we need from the
+	// events is the ID of what has been updated. by the time we service the
+	// allocation, the object may have changed, so we don't save any other
+	// information. we'll get to it later.
 	go func() {
 		for {
+			var pending pendingAllocation
 			select {
 			case <-ctx.Done():
 				return
@@ -174,10 +237,7 @@ func Run(ctx context.Context) error {
 						n = ev.(api.EventUpdateNetwork).Network
 					}
 					if n != nil {
-						pendingNetworkCond.L.Lock()
-						pendingNetworks[n.ID] = struct{}{}
-						pendingNetworkCond.Broadcast()
-						pendingNetworksCond.L.Unlock()
+						pending = pendingAllocation{networkObj, n.ID}
 					}
 				case api.EventDeleteNetwork:
 					// if the user deletes  the network, we don't have to do any
@@ -194,10 +254,7 @@ func Run(ctx context.Context) error {
 						s = ev.(api.EventUpdateService).Service
 					}
 					if s != nil {
-						pendingServicesCond.L.Lock()
-						pendingServices[s.ID] = struct{}{}
-						pendingServicesCond.Broadcast()
-						pendingServicesCond.L.Unlock()
+						pending = pendingAllocation{serviceObj, s.ID}
 					}
 				case api.EventDeleteService:
 					if ev.Service != nil {
@@ -210,21 +267,9 @@ func Run(ctx context.Context) error {
 					} else {
 						t = ev.(api.EventUpdateTask).Task
 					}
-
-					// bail out of it's a nil task
-					if t == nil {
-						continue
+					if t != nil {
+						pending = pendingAllocation{taskObj, t.ID}
 					}
-					// if the task state is already past pending, or the task
-					// desired state is a terminal state, then we can short circuit
-					// this part.
-					if t.Status.State >= api.TaskStatePending || t.DesiredState >= api.TaskStateCompleted {
-						continue
-					}
-					pendingTasksCond.L.Lock()
-					pendingTasks[t.ID] = struct{}{}
-					pendingTasksCond.Broadcast()
-					pendingTasksCond.L.Unlock()
 				case api.EventDeleteTask:
 					if ev.Task != nil {
 						a.network.DeallocateTask(ev.Task)
@@ -237,10 +282,7 @@ func Run(ctx context.Context) error {
 						n = ev.(api.EventUpdateNode).Node
 					}
 					if n != nil {
-						pendingNodesCond.L.Lock()
-						pendingNodes[n.ID] = struct{}{}
-						pendingNodesCond.Broadcast()
-						pendingNodesCond.L.Unlock()
+						pending = pendingAllocation{nodeObj, n.ID}
 					}
 				case api.EventDeleteNode:
 					if ev.Node != nil {
@@ -248,6 +290,60 @@ func Run(ctx context.Context) error {
 					}
 				}
 			}
+			if pending != (pendingAllocation{}) {
+				// avoid blocking on a send to pendingAllocationsIn
+				select {
+				case <-ctx.Done():
+					return
+				case pendingAllocationsIn <- pending:
+				}
+			}
 		}
 	}()
+}
+
+// workQueue essentially functions as a way to aggregate and deduplicate
+// incoming work
+func workQueue(ctx context.Context) (chan<- string, <-chan string) {
+	work := map[pendingAllocation]struct{}{}
+	// make a buffered channel for the inbox so readers are a bit less likely
+	// to block
+	inbox := make(chan string, 1)
+	outbox := make(chan string)
+	go func() {
+		defer close(outbox)
+		for {
+			// two paths. we want callers to block until there is work ready
+			// for them, not give them empty string every time they call. so,
+			// we only select on the channel send if there is work
+			if len(work) > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case in := <-inbox:
+					work[in] = struct{}{}
+				case outbox <- pick(work):
+				}
+			} else {
+				select {
+				case <-ctx.Done():
+					return
+				case in := <-inbox:
+					work[in] = struct{}{}
+				}
+			}
+		}
+	}()
+	return inbox, outbox
+}
+
+// pick selects one item from a map, deletes it from the map, and returns it.
+func pick(set map[pendingAllocation]struct{}) string {
+	choice := pendingAllocation{}
+	for k := range set {
+		choice = k
+		break
+	}
+	delete(set, k)
+	return k
 }
