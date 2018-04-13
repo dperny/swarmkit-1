@@ -1202,5 +1202,26 @@ var _ = Describe("ipam.Allocator", func() {
 				})
 			})
 		})
+		// TODO(dperny): write these tests.
+		// honestly i'm so tired of writing tests jfc
+		// please no more
+		PDescribe("allocating attachments", func() {
+			Context("when successfully allocating attachments", func() {
+				Context("with no addresses specified in the configs", func() {
+				})
+				Context("when some addresses are specified in the configs", func() {
+				})
+			})
+			Context("when invalid addresses are specified in the configs", func() {
+			})
+			Context("when some addresses have already been allocated and then allocation fails", func() {
+				It("should release the allocated addresses", func() {
+				})
+				It("should return an error", func() {
+				})
+			})
+			Context("when addresses in one pool are exhausted", func() {
+			})
+		})
 	})
 })

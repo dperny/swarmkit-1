@@ -36,8 +36,8 @@ type Allocator interface {
 	DeallocateNetwork(*api.Network)
 	AllocateVIPs(*api.Endpoint, []string) error
 	DeallocateVIPs(*api.Endpoint)
-	AllocateAttachment(*api.NetworkAttachment, *api.NetworkAttachmentConfig) error
-	DeallocateAttachment(*api.NetworkAttachment)
+	AllocateAttachments([]*api.NetworkAttachmentConfig) ([]*api.NetworkAttachment, error)
+	DeallocateAttachments([]*api.NetworkAttachment)
 }
 
 // allocator is an allocator for IP addresses and IPAM pools. It handles all
@@ -461,10 +461,15 @@ func (a *allocator) DeallocateNetwork(network *api.Network) {
 }
 
 // AllocateVIPs allocates the VIPs for the provided endpoint and network ids.
-// The provided endpoint must have resolution mode VIP, not DNSRR. If the mode
-// of an endpoint changes from ResolutionModeVirtualIP to
-// ResolutionModeDNSRoundRobin, call DeallocateVIPs on the endpoint
 func (a *allocator) AllocateVIPs(endpoint *api.Endpoint, networkIDs []string) (rerr error) {
+	// if the endpoint spec mode has changed to DNSRR, then what we're actually
+	// doing is freeing all of the endpoint specs.
+	if endpoint.Spec != nil {
+		if endpoint.Spec.Mode == api.ResolutionModeDNSRoundRobin {
+			a.deallocateVIPs(endpoint.VirtualIPs)
+			return nil
+		}
+	}
 	// first, go through and check that every network we want a VIP for is
 	// allocated. if not, return an error. We can't allocate VIPs until the
 	// network is allocated
@@ -572,6 +577,7 @@ allocateLoop:
 	return nil
 }
 
+// DeallocateVIPs releases all of the VIPs in the endpoint.
 func (a *allocator) DeallocateVIPs(endpoint *api.Endpoint) {
 	a.deallocateVIPs(endpoint.VirtualIPs)
 }
@@ -606,12 +612,114 @@ func (a *allocator) deallocateVIPs(deallocate []*api.Endpoint_VirtualIP) {
 	}
 }
 
-// AllocateAttachment allocates the provided NetworkAttachment belonging to a
-// node or task
-func (a *allocator) AllocateAttachment(attachment *api.NetworkAttachment, spec *api.NetworkAttachmentConfig) error {
-	return nil
+// AllocateAttachments takes a list of NetworkAttachmentConfigs and allocates
+// IP addresses for all of them, returning NetworkAttachment objects.
+//
+// AllocateAttachments does not reconcile two different sets of attachments. It
+// is up to the caller to determine which attachments need to be allocated or
+// deallocated.
+func (a *allocator) AllocateAttachments(configs []*api.NetworkAttachmentConfig) (attachments []*api.NetworkAttachment, rerr error) {
+	finalAttachments := make([]*api.NetworkAttachment, 0, len(configs))
+
+	// if anything fails, we need to release all of the addresses we just
+	// allocated
+	defer func() {
+		if rerr != nil {
+			a.deallocateAttachments(finalAttachments)
+		}
+	}()
+
+	for _, config := range configs {
+		// first, get the network
+		// this ONLY WORKS because a network cannot be updated. if a network can be
+		// updated, we'd have a lot more headaches.
+		local, ok := a.networks[config.Target]
+		if !ok {
+			return nil, ErrNetworkNotAllocated{config.Target}
+		}
+
+		attachment := &api.NetworkAttachment{
+			Network:              local.nw,
+			Aliases:              config.Aliases,
+			DriverAttachmentOpts: config.DriverAttachmentOpts,
+			Addresses:            make([]string, 0, len(config.Addresses)),
+		}
+		// even before we've allocated anything, add the attachment to the
+		// finalAttachments, so that the roll back proceeds correctly if
+		// anything fails
+		finalAttachments = append(finalAttachments, attachment)
+
+		// now get the IPAM driver and options
+		ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
+		ipamOpts := local.nw.IPAM.Driver.Options
+
+		// now allocate all of the addreses. The user might not have requested
+		// any addreses specifically, in which case we should just add one
+		// emptystring for the loop body to run once
+		addresses := config.Addresses
+		if len(addresses) == 0 {
+			addresses = []string{""}
+		}
+	addressesLoop:
+		for _, address := range addresses {
+			var requestIP net.IP
+			if address != "" {
+				var err error
+				requestIP, _, err = net.ParseCIDR(address)
+				if err != nil {
+					requestIP = net.ParseIP(address)
+					if requestIP == nil {
+						return nil, ErrInvalidAddress{address}
+					}
+				}
+			}
+			// now that we've got the IP address in a usable form, try
+			// reserving it. we will need to try for each pool
+			for _, poolID := range local.pools {
+				ip, _, err := ipam.RequestAddress(poolID, requestIP, ipamOpts)
+				if err == nil {
+					// if we successfully have an address, track it in our
+					// endpoints map, and add it to the attachment address.
+					// then, go to the next address
+					local.endpoints[ip.String()] = poolID
+					attachment.Addresses = append(attachment.Addresses, ip.String())
+					continue addressesLoop
+				}
+				// if we get ErrIPOutOfRange or ErrNoAvailableIPs, it means
+				// this pool might not be right or available for this address.
+				// in that case, try the next pool
+				if err == ipamapi.ErrIPOutOfRange || err == ipamapi.ErrNoAvailableIPs {
+					continue
+				}
+				// if we get any other error, bail out because this address
+				// isn't going to work
+				return nil, ErrFailedAddressRequest{address, err}
+			}
+		}
+	}
+	// finally, once we've gone through every address for every config, return
+	// the final result and no error
+	return finalAttachments, nil
 }
 
-func (a *allocator) DeallocateAttachment(attachment *api.NetworkAttachment) {
+func (a *allocator) DeallocateAttachments(attachments []*api.NetworkAttachment) {
+	a.deallocateAttachments(attachments)
+}
 
+func (a *allocator) deallocateAttachments(attachments []*api.NetworkAttachment) {
+	for _, attachment := range attachments {
+		// get the local network and IPAM driver
+		local := a.networks[attachment.Network.ID]
+		ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
+
+		for _, address := range attachment.Addresses {
+			poolID := local.endpoints[address]
+			delete(local.endpoints, address)
+
+			// both of these things can error, but we can't do anything about
+			// it if they do, so we ignore the errors.
+			ip, _, _ := net.ParseCIDR(address)
+			ipam.ReleaseAddress(poolID, ip)
+		}
+	}
 }
