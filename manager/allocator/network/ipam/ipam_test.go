@@ -17,6 +17,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+const swappableIPAM = "swappable"
+
 type ipamAndCaps struct {
 	ipam ipamapi.Ipam
 	caps *ipamapi.Capability
@@ -104,7 +106,8 @@ func (m *mockIpam) IsBuiltIn() bool {
 // records which addresses and pools it has been called with
 type addressRestorerMockIpam struct {
 	*mockIpam
-	addresses []string
+	// maps addresses to poolID
+	addresses map[string]string
 	pools     []struct {
 		subnet  string
 		iprange string
@@ -115,17 +118,17 @@ type addressRestorerMockIpam struct {
 func (m *addressRestorerMockIpam) RequestPool(_ string, subnet string, iprange string, options map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
 	m.pools = append(m.pools, struct{ subnet, iprange string }{subnet, iprange})
 	// record the subnet
-	ip := net.ParseIP(subnet)
-	return strconv.Itoa(len(m.pools)), &net.IPNet{ip, ip.DefaultMask()}, nil, nil
+	ip, _, _ := net.ParseCIDR(subnet)
+	return strconv.Itoa(len(m.pools)), &net.IPNet{IP: ip, Mask: ip.DefaultMask()}, nil, nil
 }
 
-func (m *addressRestorerMockIpam) RequestAddress(_ string, ip net.IP, opts map[string]string) (*net.IPNet, map[string]string, error) {
+func (m *addressRestorerMockIpam) RequestAddress(poolID string, ip net.IP, opts map[string]string) (*net.IPNet, map[string]string, error) {
 	ips := ip.String()
 	if r, ok := opts[ipamapi.RequestAddressType]; ok && r == netlabel.Gateway {
 		ips = ips + "gateway"
 	}
-	m.addresses = append(m.addresses, ips)
-	return &net.IPNet{ip, ip.DefaultMask()}, nil, nil
+	m.addresses[ips] = poolID
+	return &net.IPNet{IP: ip, Mask: ip.DefaultMask()}, nil, nil
 }
 
 var _ = Describe("ipam.Allocator", func() {
@@ -144,7 +147,7 @@ var _ = Describe("ipam.Allocator", func() {
 		// "restores" addresses already requested
 		restorer = &addressRestorerMockIpam{
 			&mockIpam{},
-			[]string{},
+			map[string]string{},
 			[]struct{ subnet, iprange string }{},
 		}
 		reg.ipams["restore"] = ipamAndCaps{
@@ -420,7 +423,11 @@ var _ = Describe("ipam.Allocator", func() {
 			})
 			It("should have requested all of the IP address", func() {
 				Expect(restorer.addresses).To(HaveLen(8))
-				Expect(restorer.addresses).To(ConsistOf(
+				addresses := []string{}
+				for addr := range restorer.addresses {
+					addresses = append(addresses, addr)
+				}
+				Expect(addresses).To(ConsistOf(
 					"192.168.1.1gateway",
 					"192.168.2.1gateway",
 					"192.168.1.2",
@@ -494,7 +501,7 @@ var _ = Describe("ipam.Allocator", func() {
 					requestPoolFunc: func(addressSpace, pool, subpool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
 						poolsRequested = poolsRequested + 1
 						return "pool1",
-							&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+							&net.IPNet{IP: net.IPv4(192, 168, 2, 0), Mask: net.IPv4Mask(255, 255, 255, 0)},
 							map[string]string{
 								netlabel.Gateway: "192.168.2.1/24",
 							},
@@ -502,7 +509,7 @@ var _ = Describe("ipam.Allocator", func() {
 					},
 					requestAddressFunc: func(_ string, _ net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
 						addressesRequested = addressesRequested + 1
-						return &net.IPNet{net.IPv4(192, 168, 2, 2), net.IPv4Mask(255, 255, 255, 128)}, nil, nil
+						return &net.IPNet{IP: net.IPv4(192, 168, 2, 2), Mask: net.IPv4Mask(255, 255, 255, 128)}, nil, nil
 					},
 				}
 				reg.ipams["default"] = ipamAndCaps{mock, nil}
@@ -560,7 +567,7 @@ var _ = Describe("ipam.Allocator", func() {
 				BeforeEach(func() {
 					mock.requestPoolFunc = func(_, _, _ string, _ map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
 						return "pool2",
-							&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+							&net.IPNet{IP: net.IPv4(192, 168, 2, 0), Mask: net.IPv4Mask(255, 255, 255, 0)},
 							map[string]string{},
 							nil
 					}
@@ -592,7 +599,7 @@ var _ = Describe("ipam.Allocator", func() {
 					mock.requestAddressFunc = func(_ string, address net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
 						addressesRequested = addressesRequested + 1
 						addressRequested = address.String()
-						return &net.IPNet{address, address.DefaultMask()}, nil, nil
+						return &net.IPNet{IP: address, Mask: address.DefaultMask()}, nil, nil
 					}
 					network = &api.Network{
 						ID: "net1",
@@ -632,7 +639,7 @@ var _ = Describe("ipam.Allocator", func() {
 						requestPoolFunc: func(addressSpace, pool, subpool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
 							wasCalled = true
 							return "nondefaultpool",
-								&net.IPNet{net.IPv4(192, 168, 10, 0), net.IPv4Mask(255, 255, 255, 0)},
+								&net.IPNet{IP: net.IPv4(192, 168, 10, 0), Mask: net.IPv4Mask(255, 255, 255, 0)},
 								map[string]string{
 									netlabel.Gateway: "192.168.10.1/24",
 								},
@@ -693,7 +700,7 @@ var _ = Describe("ipam.Allocator", func() {
 						calledWithOptions = options
 						poolsRequested = poolsRequested + 1
 						return "pool1",
-							&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+							&net.IPNet{IP: net.IPv4(192, 168, 2, 0), Mask: net.IPv4Mask(255, 255, 255, 0)},
 							map[string]string{
 								netlabel.Gateway: "192.168.2.1/24",
 							},
@@ -816,7 +823,7 @@ var _ = Describe("ipam.Allocator", func() {
 						requestPoolFunc: func(addressSpace, pool, subpool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
 							poolsRequested = poolsRequested + 1
 							return "pool1",
-								&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+								&net.IPNet{IP: net.IPv4(192, 168, 2, 0), Mask: net.IPv4Mask(255, 255, 255, 0)},
 								map[string]string{
 									netlabel.Gateway: "notvalid",
 								},
@@ -851,7 +858,7 @@ var _ = Describe("ipam.Allocator", func() {
 					mock := &mockIpam{
 						requestPoolFunc: func(_, _, _ string, _ map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
 							return "pool1",
-								&net.IPNet{net.IPv4(192, 168, 2, 0), net.IPv4Mask(255, 255, 255, 0)},
+								&net.IPNet{IP: net.IPv4(192, 168, 2, 0), Mask: net.IPv4Mask(255, 255, 255, 0)},
 								map[string]string{
 									netlabel.Gateway: "192.168.2.1/24",
 								},
@@ -899,7 +906,7 @@ var _ = Describe("ipam.Allocator", func() {
 						requestPoolFunc: func(_, _, _ string, _ map[string]string, _ bool) (string, *net.IPNet, map[string]string, error) {
 							i = i + 1
 							return fmt.Sprintf("pool%v", i),
-								&net.IPNet{net.IPv4(192, 168, i, 0), net.IPv4Mask(255, 255, 255, 0)},
+								&net.IPNet{IP: net.IPv4(192, 168, i, 0), Mask: net.IPv4Mask(255, 255, 255, 0)},
 								map[string]string{
 									netlabel.Gateway: fmt.Sprintf("192.168.%v.1/24", i),
 								},
@@ -999,13 +1006,16 @@ var _ = Describe("ipam.Allocator", func() {
 	Describe("allocating VIPs and Attachments", func() {
 		var (
 			addressesAllocated int
+			pool               map[string]string
 			// addressesReleased contains all of the addresses released and
 			// their pool IDs
-			addressesReleased map[string]net.IP
+			addressesReleased map[string]string
+			mockDefaultIpam   *mockIpam
 		)
 		BeforeEach(func() {
 			addressesAllocated = 0
-			addressesReleased = map[string]net.IP{}
+			addressesReleased = map[string]string{}
+			pool = map[string]string{}
 
 			// set up some networks and mocks. allocating VIPs and attachments
 			// requires a lot more dependent state than allocating Networks
@@ -1037,7 +1047,7 @@ var _ = Describe("ipam.Allocator", func() {
 					ID: "nw2",
 					IPAM: &api.IPAMOptions{
 						Driver: &api.Driver{
-							Name:    ipamapi.DefaultIPAM,
+							Name:    swappableIPAM,
 							Options: map[string]string{"foo": "bar"},
 						},
 						Configs: []*api.IPAMConfig{
@@ -1051,19 +1061,26 @@ var _ = Describe("ipam.Allocator", func() {
 				},
 			}
 			// make a mock IPAM driver that can allocate new addresses.
-			mockDefaultIpam := &mockIpam{
-				requestAddressFunc: func(_ string, addr net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
+			mockDefaultIpam = &mockIpam{
+				requestAddressFunc: func(id string, addr net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
 					// it doesn't matter if the address is literally anywhere
 					// near correct or real. we don't have to reproduce the
 					// actual behavior of an IPAM driver. the only behavior
 					// that actually matters is returning valid IP addresses
 					// that are different from one another
-					ip := net.IPv4(192, 168, 3, byte(addressesAllocated))
+					var ip *net.IPNet
+					if addr != nil {
+						ip = &net.IPNet{IP: addr, Mask: addr.DefaultMask()}
+					} else {
+						allocAddr := net.IPv4(192, 168, 3, byte(addressesAllocated))
+						ip = &net.IPNet{IP: allocAddr, Mask: allocAddr.DefaultMask()}
+					}
+					pool[ip.IP.String()] = id
 					addressesAllocated = addressesAllocated + 1
-					return &net.IPNet{ip, ip.DefaultMask()}, nil, nil
+					return ip, nil, nil
 				},
 				releaseAddressFunc: func(pool string, addr net.IP) error {
-					addressesReleased[pool] = addr
+					addressesReleased[addr.String()] = pool
 					return nil
 				},
 			}
@@ -1071,8 +1088,12 @@ var _ = Describe("ipam.Allocator", func() {
 			// swap out the default mock IPAM for the restorer mock IPAM for
 			// just long enough to restore all of this
 			reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{restorer, nil}
+			// the "swappable" ipam has the same behavior as default unless
+			// we change it.
+			reg.ipams[swappableIPAM] = ipamAndCaps{restorer, nil}
 			defer func() {
 				reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{mockDefaultIpam, nil}
+				reg.ipams[swappableIPAM] = ipamAndCaps{mockDefaultIpam, nil}
 			}()
 			a.Restore(networks, nil, nil)
 		})
@@ -1105,8 +1126,8 @@ var _ = Describe("ipam.Allocator", func() {
 					Expect(endpoint.VirtualIPs).ToNot(BeNil())
 					Expect(endpoint.VirtualIPs).To(HaveLen(2))
 					Expect(endpoint.VirtualIPs).To(ConsistOf(
-						&api.Endpoint_VirtualIP{"nw1", "192.168.3.0/24"},
-						&api.Endpoint_VirtualIP{"nw2", "192.168.3.1/24"},
+						&api.Endpoint_VirtualIP{NetworkID: "nw1", Addr: "192.168.3.0/24"},
+						&api.Endpoint_VirtualIP{NetworkID: "nw2", Addr: "192.168.3.1/24"},
 					))
 				})
 				It("should have allocated 2 addresses", func() {
@@ -1149,8 +1170,8 @@ var _ = Describe("ipam.Allocator", func() {
 						Expect(endpoint.VirtualIPs).ToNot(BeNil())
 						Expect(endpoint.VirtualIPs).To(HaveLen(2))
 						Expect(endpoint.VirtualIPs).To(ConsistOf(
-							&api.Endpoint_VirtualIP{"nw1", "192.168.0.2/24"},
-							&api.Endpoint_VirtualIP{"nw2", "192.168.3.0/24"},
+							&api.Endpoint_VirtualIP{NetworkID: "nw1", Addr: "192.168.0.2/24"},
+							&api.Endpoint_VirtualIP{NetworkID: "nw2", Addr: "192.168.3.0/24"},
 						))
 					})
 				})
@@ -1171,9 +1192,11 @@ var _ = Describe("ipam.Allocator", func() {
 						// relying on the fact that I know this IP address
 						// belongs to pool 1 because i know how the
 						// addressRestorerMockIpam works
-						Expect(addressesReleased).To(HaveKey("2"))
-						addr, _, _ := net.ParseCIDR("192.168.0.2/24")
-						Expect(addressesReleased["2"]).To(Equal(addr))
+						ip := "192.168.0.2"
+						Expect(addressesReleased).To(HaveKey(ip))
+						// find the pool this address was allocated from
+						poolID := restorer.addresses[ip]
+						Expect(addressesReleased[ip]).To(Equal(poolID))
 					})
 				})
 				Context("to both add and remove a network", func() {
@@ -1190,14 +1213,15 @@ var _ = Describe("ipam.Allocator", func() {
 						Expect(addressesAllocated).To(Equal(1))
 						Expect(endpoint.VirtualIPs).To(HaveLen(1))
 						Expect(endpoint.VirtualIPs).To(ConsistOf(
-							&api.Endpoint_VirtualIP{"nw2", "192.168.3.0/24"},
+							&api.Endpoint_VirtualIP{NetworkID: "nw2", Addr: "192.168.3.0/24"},
 						))
 					})
 					It("should deallocate one vip", func() {
 						Expect(addressesReleased).To(HaveLen(1))
-						Expect(addressesReleased).To(HaveKey("2"))
 						addr, _, _ := net.ParseCIDR("192.168.0.2/24")
-						Expect(addressesReleased["2"]).To(Equal(addr))
+						Expect(addressesReleased).To(HaveKey(addr.String()))
+						poolID := restorer.addresses[addr.String()]
+						Expect(addressesReleased[addr.String()]).To(Equal(poolID))
 					})
 				})
 			})
@@ -1205,22 +1229,85 @@ var _ = Describe("ipam.Allocator", func() {
 		// TODO(dperny): write these tests.
 		// honestly i'm so tired of writing tests jfc
 		// please no more
-		PDescribe("allocating attachments", func() {
-			Context("when successfully allocating attachments", func() {
-				Context("with no addresses specified in the configs", func() {
-				})
-				Context("when some addresses are specified in the configs", func() {
-				})
+		Describe("allocating attachments", func() {
+			var (
+				specs       []*api.NetworkAttachmentConfig
+				attachments []*api.NetworkAttachment
+				err         error
+			)
+			BeforeEach(func() {
+				specs = []*api.NetworkAttachmentConfig{
+					{
+						Target:               "nw1",
+						DriverAttachmentOpts: map[string]string{"foo": "true"},
+					},
+					{
+						Target:    "nw2",
+						Addresses: []string{"192.168.2.3", "192.168.2.4"},
+					},
+				}
 			})
-			Context("when invalid addresses are specified in the configs", func() {
+			JustBeforeEach(func() {
+				attachments, err = a.AllocateAttachments(specs)
+			})
+			Context("when successfully allocating attachments", func() {
+				It("should not return an error", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should return the same number of attachments requested", func() {
+					Expect(attachments).To(HaveLen(len(specs)))
+					for _, attachment := range attachments {
+						Expect(attachment).ToNot(BeNil())
+					}
+				})
+				It("should allocate new addresses for attachments with no addresses specified", func() {
+					// once again, we're relying on the order of attachments,
+					// which is only for convenience. If we change the
+					// implementation later, and this test fails, it's no big
+					// deal.
+					addresses := attachments[0].Addresses
+					Expect(addresses).ToNot(BeEmpty())
+					Expect(addresses).To(HaveLen(1))
+					Expect(addresses[0]).To(Equal("192.168.3.0/24"))
+				})
+				It("should copy the DriverAttachmentOpts map", func() {
+					// NOTE(dperny): there are no guarantees made about
+					// the attachments being returned in order. we're relying
+					// on that behavior here for convenience's sake.
+					for i := range attachments {
+						Expect(specs[i].DriverAttachmentOpts).To(Equal(attachments[i].DriverAttachmentOpts))
+					}
+				})
+				It("should only allocate the first address available if a list of addresses is provided", func() {
+					addresses := attachments[1].Addresses
+					Expect(addresses).ToNot(BeEmpty())
+					Expect(addresses).To(HaveLen(1))
+					Expect(addresses[0]).To(Equal("192.168.2.3/24"))
+				})
 			})
 			Context("when some addresses have already been allocated and then allocation fails", func() {
+				BeforeEach(func() {
+					// mockIpam without fields just returns errors, which
+					// is what we want.
+					reg.ipams[swappableIPAM] = ipamAndCaps{&mockIpam{
+						requestAddressFunc: func(_ string, _ net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
+							return nil, nil, fmt.Errorf("failed!")
+						},
+					}, nil}
+				})
+				AfterEach(func() {
+					reg.ipams[swappableIPAM] = reg.ipams[ipamapi.DefaultIPAM]
+				})
 				It("should release the allocated addresses", func() {
+					Expect(addressesReleased).To(HaveLen(1))
+					Expect(addressesReleased).To(HaveKey("192.168.3.0"))
+					poolID := pool["192.168.3.0"]
+					Expect(addressesReleased["192.168.3.0"]).To(Equal(poolID))
 				})
 				It("should return an error", func() {
+					Expect(err).To(HaveOccurred())
+					Expect(err).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
 				})
-			})
-			Context("when addresses in one pool are exhausted", func() {
 			})
 		})
 	})

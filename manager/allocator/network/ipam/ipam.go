@@ -30,6 +30,9 @@ type network struct {
 	endpoints map[string]string
 }
 
+// Allocator is an interface that represents the IP address allocator. It
+// exists mainly for testing purposes, so that the allocator can be more easily
+// mocked out.
 type Allocator interface {
 	Restore([]*api.Network, []*api.Endpoint, []*api.NetworkAttachment) error
 	AllocateNetwork(*api.Network) error
@@ -52,6 +55,7 @@ type allocator struct {
 	drvRegistry DrvRegistry
 }
 
+// NewAllocator takes a drvRegistry and creates a new IP allocator
 func NewAllocator(reg DrvRegistry) Allocator {
 	return &allocator{
 		networks:    make(map[string]*network),
@@ -104,7 +108,7 @@ func (a *allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 
 		// now initialize the IPAM pools. IPAM pools are the set of addresses
 		// available for a specific network. There is one IPAM config for every
-		// pool. In order for thsi restore operation to be consistent, a
+		// pool. In order for this restore operation to be consistent, a
 		// network must have no ipam configs if it hasn't been allocated
 		for _, config := range local.nw.IPAM.Configs {
 			// the last param of RequestPool is "v6", meaning IPv6, which we
@@ -368,7 +372,7 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 
 	// now go through all of the IPAM configs and allocate them. in the
 	// process, copy those configs to the object's configs. we do copies in
-	// order to avoid inadvertantly modifying the spec.
+	// order to avoid inadvertently modifying the spec.
 	//
 	// NOTE(dperny): be careful with this! if this loop doesn't run (because
 	// there were no items in ipamConfigs) then this will fail silently!
@@ -678,12 +682,12 @@ func (a *allocator) AllocateAttachments(configs []*api.NetworkAttachmentConfig) 
 			for _, poolID := range local.pools {
 				ip, _, err := ipam.RequestAddress(poolID, requestIP, ipamOpts)
 				if err == nil {
-					// if we successfully have an address, track it in our
-					// endpoints map, and add it to the attachment address.
-					// then, go to the next address
+					// we only want 1 address per task. so, once we've found a
+					// valid address, break out of the addresses loop, and go
+					// to the next attachmnet
 					local.endpoints[ip.String()] = poolID
 					attachment.Addresses = append(attachment.Addresses, ip.String())
-					continue addressesLoop
+					break addressesLoop
 				}
 				// if we get ErrIPOutOfRange or ErrNoAvailableIPs, it means
 				// this pool might not be right or available for this address.

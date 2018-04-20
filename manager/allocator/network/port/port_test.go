@@ -54,6 +54,7 @@ var _ = Describe("port.Allocator", func() {
 			It("should succeed", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(p).NotTo(BeNil())
+				Expect(p.IsNoop()).To(BeFalse())
 			})
 			It("should not modify the spec", func() {
 				Expect(spec).To(Equal(specCopy))
@@ -490,10 +491,97 @@ var _ = Describe("port.Allocator", func() {
 				Expect(err).ToNot(HaveOccurred())
 			})
 		})
-		// Pending, we need to test this but I'm not sure what the appropriate
-		// behavior should be
-		PContext("to change publish mode", func() {
+		Context("to change publish mode", func() {
+			Context("from ingress to host", func() {
+				var (
+					p   Proposal
+					err error
+				)
+				BeforeEach(func() {
+					spec := endpoint.Spec.Copy()
+					// port 80
+					spec.Ports[0].PublishMode = api.PublishModeHost
+					p, err = pa.Allocate(endpoint, spec)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+					Expect(p).ToNot(BeNil())
+				})
+				It("should deallocate the port changed to host mode", func() {
+					Expect(p.IsNoop()).To(BeFalse())
+					p.Commit()
+					// try allocating port 80
+					spec2 := &api.EndpointSpec{
+						Ports: []*api.PortConfig{
+							{
+								Protocol:      api.ProtocolTCP,
+								TargetPort:    80,
+								PublishedPort: 80,
+								PublishMode:   api.PublishModeIngress,
+							},
+						},
+					}
+					q, e := pa.Allocate(&api.Endpoint{}, spec2)
+					Expect(e).ToNot(HaveOccurred())
+					Expect(q).ToNot(BeNil())
+					Expect(q.IsNoop()).To(BeFalse())
+				})
+			})
+			Context("from host to ingress", func() {
+				var (
+					endpoint2 *api.Endpoint
+					p         Proposal
+					err       error
+				)
+				BeforeEach(func() {
+					spec2 := &api.EndpointSpec{
+						Ports: []*api.PortConfig{
+							{
+								Protocol:      api.ProtocolTCP,
+								PublishedPort: 911,
+								TargetPort:    80,
+								PublishMode:   api.PublishModeHost,
+							}, {
+								Protocol:      api.ProtocolTCP,
+								PublishedPort: 912,
+								TargetPort:    81,
+								PublishMode:   api.PublishModeHost,
+							},
+						},
+					}
+					endpoint2 = &api.Endpoint{}
+					// this is setup mirroring a well-tested scenario, so just
+					// ignore the error and segfault if q is nil
+					q, _ := pa.Allocate(endpoint2, spec2)
+					endpoint2.Spec = spec2.Copy()
+					endpoint2.Ports = q.Ports()
+					q.Commit()
 
+					spec2.Ports[0].PublishMode = api.PublishModeIngress
+					p, err = pa.Allocate(endpoint2, spec2)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+					Expect(p).ToNot(BeNil())
+				})
+				It("should reserve the changed port", func() {
+					p.Commit()
+					spec := &api.EndpointSpec{
+						Ports: []*api.PortConfig{
+							{
+								Protocol:      api.ProtocolTCP,
+								PublishedPort: 911,
+								TargetPort:    80,
+								PublishMode:   api.PublishModeIngress,
+							},
+						},
+					}
+					_, e := pa.Allocate(&api.Endpoint{}, spec)
+					Expect(e).To(HaveOccurred())
+					Expect(e).To(WithTransform(IsErrPortInUse, BeTrue()))
+					Expect(e.Error()).To(Equal("port 911/TCP is already reserved"))
+				})
+			})
 		})
 	})
 
@@ -576,12 +664,18 @@ var _ = Describe("port.Allocator", func() {
 
 		Context("when the dynamic port space is exhausted", func() {
 			var (
-				e error
+				endpoint *api.Endpoint
+				e        error
 			)
 			BeforeEach(func() {
+				// variables to use to capture the last created endpoint
+				var (
+					spec *api.EndpointSpec
+					prop Proposal
+					err  error
+				)
 				for i := DynamicPortStart; i <= DynamicPortEnd; i++ {
-					endpoint := &api.Endpoint{}
-					spec := &api.EndpointSpec{
+					spec = &api.EndpointSpec{
 						Ports: []*api.PortConfig{
 							{
 								Name:        fmt.Sprintf("dynamic-%v", i),
@@ -592,12 +686,16 @@ var _ = Describe("port.Allocator", func() {
 						},
 					}
 
-					prop, err := pa.Allocate(endpoint, spec)
+					prop, err = pa.Allocate(&api.Endpoint{}, spec)
 					if err != nil {
 						e = err
 						break
 					}
 					prop.Commit()
+				}
+				endpoint = &api.Endpoint{
+					Spec:  spec.Copy(),
+					Ports: prop.Ports(),
 				}
 			})
 
@@ -648,6 +746,54 @@ var _ = Describe("port.Allocator", func() {
 						BeTrue(),
 					))
 					Expect(err.Error()).To(Equal("the dynamically allocated port space [30000,32767] is exhausted for protocol TCP"))
+				})
+			})
+			Context("when removing one port and adding another", func() {
+				var (
+					p   Proposal
+					err error
+				)
+				BeforeEach(func() {
+					spec := endpoint.Spec.Copy()
+					spec.Ports = []*api.PortConfig{
+						{
+							Name:       "newport",
+							Protocol:   api.ProtocolTCP,
+							TargetPort: 80,
+							// No PublishedPort, so we should try dynamically
+							// allocating
+							PublishMode: api.PublishModeIngress,
+						},
+					}
+					p, err = pa.Allocate(endpoint, spec)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+					Expect(p).ToNot(BeNil())
+					// ports changed, but net allocation didn't, so this will
+					// be a noop
+					Expect(p.IsNoop()).To(BeTrue())
+				})
+			})
+			Context("when adding a new, static published port", func() {
+				var (
+					p   Proposal
+					err error
+				)
+				BeforeEach(func() {
+					spec := endpoint.Spec.Copy()
+					spec.Ports = append(spec.Ports, &api.PortConfig{
+						Protocol:      api.ProtocolTCP,
+						TargetPort:    8080,
+						PublishedPort: 8080,
+						PublishMode:   api.PublishModeIngress,
+					})
+					p, err = pa.Allocate(endpoint, spec)
+				})
+				It("should succeed", func() {
+					Expect(err).ToNot(HaveOccurred())
+					Expect(p).ToNot(BeNil())
+					Expect(p.IsNoop()).To(BeFalse())
 				})
 			})
 		})
@@ -739,6 +885,21 @@ var _ = Describe("port.Allocator", func() {
 					Expect(p).ToNot(BeNil())
 					Expect(p.IsNoop()).ToNot(BeTrue())
 					Expect(p.Ports()).ToNot(BeEmpty())
+				})
+				It("should free the previously allocated dynamic port", func() {
+					p.Commit()
+					spec2 := &api.EndpointSpec{
+						Ports: []*api.PortConfig{
+							{
+								Protocol:      api.ProtocolTCP,
+								TargetPort:    80,
+								PublishedPort: endpoint.Ports[0].PublishedPort,
+								PublishMode:   api.PublishModeIngress,
+							},
+						},
+					}
+					_, err := pa.Allocate(&api.Endpoint{}, spec2)
+					Expect(err).ToNot(HaveOccurred())
 				})
 			})
 			Context("from statically to dynamically allocated", func() {

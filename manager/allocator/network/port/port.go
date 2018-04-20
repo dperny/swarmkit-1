@@ -127,13 +127,13 @@ type Proposal interface {
 	// Commit commits the result of the Allocator transaction and alters
 	// the state of the port allocator. Part of the contract of the
 	// Allocator is that it should always return a valid proposal, and so
-	// Commit will always succeed and does not need to return an error
+	// Commit will always succeed and does not need to return an error.
 	Commit()
 
-	// IsNoop returns true if the Proposal doesn't actually modify allocator
-	// state This does not mean the endpoint object has not been modified, just
-	// that it hasn't gained or lost any allocated published ports. Used mostly
-	// for testing.
+	// IsNoop returns true if the Proposal doesn't actually modify the net
+	// allocator state. IsNoop does not mean the ports for an endpoint haven't
+	// changed. It only means that the publish ports marked in use by the
+	// allocator haven't changed.
 	IsNoop() bool
 }
 
@@ -151,10 +151,9 @@ func (prop *proposal) Ports() []*api.PortConfig {
 	return prop.ports
 }
 
-// Commit commits the proposal to the port allocator. Part of our
+// Commit commits the proposal to the port allocator.
 func (prop *proposal) Commit() {
 	if prop.IsNoop() {
-		// cannot commit with nil port allocator
 		// nothing to do if proposal is noop, short circuit a bit
 		return
 	}
@@ -169,16 +168,16 @@ func (prop *proposal) Commit() {
 	}
 }
 
+// IsNoop returns true if the ports in use before this proposal are the same as
+// the ports in use after.
 func (prop *proposal) IsNoop() bool {
-	// if every port in allocate is in deallocate, and every port in deallocate
-	// is in allocate
+	// if the allocate and deallocate sets are the same length, and every port
+	// in allocate is also found in deallocate, then this proposal is a noop
+	if len(prop.allocate) != len(prop.deallocate) {
+		return false
+	}
 	for p := range prop.allocate {
 		if _, ok := prop.deallocate[p]; !ok {
-			return false
-		}
-	}
-	for p := range prop.deallocate {
-		if _, ok := prop.allocate[p]; !ok {
 			return false
 		}
 	}
@@ -404,6 +403,26 @@ ports:
 				}
 			}
 		}
+		// we're out of dynamic ports. check to see if we've deallocated any
+		// dynamic ports in this object
+		for deallocated := range prop.deallocate {
+			// is the protocol the same? is the deallocated port in the dynamic
+			// port range?
+			if deallocated.protocol == portObj.protocol &&
+				DynamicPortStart <= deallocated.port &&
+				deallocated.port <= DynamicPortEnd {
+				// are not we already reallocating this port?
+				if _, ok := prop.allocate[deallocated]; !ok {
+					// if all of the above, we can use that published port for
+					// this new port and move to the next port
+					portObj.port = deallocated.port
+					p.PublishedPort = deallocated.port
+					prop.allocate[portObj] = struct{}{}
+					continue ports
+				}
+			}
+		}
+
 		// if we've gotten all the way through the whole range of dynamic
 		// ports, and there are no ports left, return an error
 		return nil, ErrPortSpaceExhausted{p.Protocol}
