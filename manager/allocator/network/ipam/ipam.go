@@ -6,8 +6,10 @@ import (
 
 	"github.com/docker/libnetwork/ipamapi"
 	"github.com/docker/libnetwork/netlabel"
+	"github.com/docker/libnetwork/types"
 
 	"github.com/docker/swarmkit/api"
+	"github.com/docker/swarmkit/manager/allocator/network/errors"
 )
 
 // DrvRegistry is an interface defining
@@ -98,12 +100,12 @@ func (a *allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 		// that part of the return value
 		ipam, _ := a.drvRegistry.IPAM(ipamName)
 		if ipam == nil {
-			return ErrInvalidIPAM{ipamName, nw.ID}
+			return errors.ErrBadState("ipam driver %v cannot be found", ipamName)
 		}
 		_, addressSpace, err := ipam.GetDefaultAddressSpaces()
 		// the only errors here result from having an invalid ipam driver
 		if err != nil {
-			return ErrBustedIPAM{ipamName, nw.ID, err}
+			return errors.ErrInternal("ipam %v for network %v returned an error when requesting the default address space: %v", ipamName, nw.ID, err)
 		}
 
 		// now initialize the IPAM pools. IPAM pools are the set of addresses
@@ -120,10 +122,10 @@ func (a *allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 				// there is an error at this stage, it means the whole object
 				// store is in a bad state, so we don't do that, we just
 				// abandon everything.
-				return ErrBadState{
-					local.nw.ID,
-					fmt.Sprintf("error reserving ipam pool: %v", err),
-				}
+				return errors.ErrBadState(
+					"error reserving ipam pool for network %v: %v",
+					nw.ID, err,
+				)
 			}
 			// each IPAM pool we use has a separate ID referring to it. We also
 			// keep a map of each IP address we have allocated for this network
@@ -142,10 +144,10 @@ func (a *allocator) Restore(networks []*api.Network, endpoints []*api.Endpoint, 
 			if config.Gateway != "" {
 				_, _, err := ipam.RequestAddress(poolID, net.ParseIP(config.Gateway), ipamOpts)
 				if err != nil {
-					return ErrBadState{
-						local.nw.ID,
-						fmt.Sprintf("error requesting already assigned gateway address %v", err),
-					}
+					return errors.ErrBadState(
+						"error requesting already assigned gateway address %v: %v",
+						err,
+					)
 				}
 				// NOTE(dperny): this check was originally here:
 				// if gwIP.IP.String() != config.Gateway {
@@ -226,11 +228,13 @@ func (a *allocator) restoreAddress(nwid string, address string) error {
 	// first, get the local network state and IPAM driver
 	local, ok := a.networks[nwid]
 	if !ok {
-		return ErrNetworkNotAllocated{nwid}
+		return errors.ErrDependencyNotAllocated("network", nwid)
 	}
 	ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
 	if ipam == nil {
-		return ErrInvalidIPAM{local.nw.IPAM.Driver.Name, local.nw.ID}
+		return errors.ErrInvalidSpec(
+			"ipam driver %v cannot be found", local.nw.IPAM.Driver.Name,
+		)
 	}
 	ipamOpts := local.nw.IPAM.Driver.Options
 	// NOTE(dperny): this code, where we try parsing as CIDR and
@@ -240,7 +244,7 @@ func (a *allocator) restoreAddress(nwid string, address string) error {
 	if err != nil {
 		addr = net.ParseIP(address)
 		if addr == nil {
-			return ErrInvalidAddress{address}
+			return errors.ErrInvalidSpec("address %v is not valid", address)
 		}
 	}
 	// we don't know which pool this address belongs to, so go through each
@@ -259,15 +263,12 @@ func (a *allocator) restoreAddress(nwid string, address string) error {
 			continue
 		}
 		if err != nil {
-			return ErrBadState{
+			return errors.ErrBadState(
+				"error restoring network %v when requesting address %v: %v",
 				local.nw.ID,
-				fmt.Sprintf(
-					"error with driver %v requesting address %v: %v",
-					local.nw.IPAM.Driver.Name,
-					addr.String(),
-					err,
-				),
-			}
+				addr.String(),
+				err,
+			)
 		}
 		// if we get this far, the address belongs to this pool. add to the
 		// endpoints map for deallocation later and return nil, for no error
@@ -279,10 +280,12 @@ func (a *allocator) restoreAddress(nwid string, address string) error {
 	// the next iteration of the addresses loop, then we're in a
 	// weird situation where the address is out of range for
 	// _every_ pool on the network.
-	return ErrBadState{
+	return errors.ErrBadState(
+		"error restoring network %v when requesting address %v: %v",
 		local.nw.ID,
-		fmt.Sprintf("requested address %v is out of range", addr),
-	}
+		addr.String(),
+		"address is out of range for all pools",
+	)
 }
 
 // AllocateNetwork allocates the IPAM pools for the given network. The network
@@ -294,7 +297,7 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 	// check if this network is already being managed and return an error if it
 	// is. networks are immutable and cannot be updated.
 	if _, ok := a.networks[n.ID]; ok {
-		return ErrNetworkAllocated{n.ID}
+		return errors.ErrAlreadyAllocated()
 	}
 
 	// Now get the IPAM driver and options, either the defaults or the user's
@@ -305,7 +308,7 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 	}
 	ipam, _ := a.drvRegistry.IPAM(ipamName)
 	if ipam == nil {
-		return ErrInvalidIPAM{ipamName, n.ID}
+		return errors.ErrInvalidSpec("ipam driver %v cannot be found", ipamName)
 	}
 
 	// make sure here that ipamOpts is not nil so we don't need to nil check it
@@ -325,7 +328,7 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 
 	_, addressSpace, err := ipam.GetDefaultAddressSpaces()
 	if err != nil {
-		return ErrBustedIPAM{ipamName, n.ID, err}
+		return errors.ErrInternal("ipam %v for network %v returned an error when requesting the default address space: %v", ipamName, n.ID, err)
 	}
 
 	// now create the local network state object
@@ -356,14 +359,22 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 				// only free addresses that were actually allocated
 				if ip := net.ParseIP(config.Gateway); ip != nil {
 					if err := ipam.ReleaseAddress(local.pools[config.Subnet], ip); err != nil {
-						rerr = ErrDoubleFault{rerr, err}
+						rerr = errors.ErrInternal(
+							"an error occurred when rolling back a partially successful allocation. originally: %v, now: %v",
+							rerr,
+							err,
+						)
 						return
 					}
 				}
 			}
 			for _, pool := range local.pools {
 				if err := ipam.ReleasePool(pool); err != nil {
-					rerr = ErrDoubleFault{rerr, err}
+					rerr = errors.ErrInternal(
+						"an error occurred when rolling back a partially successful allocation. originally: %v, now: %v",
+						rerr,
+						err,
+					)
 					return
 				}
 			}
@@ -382,7 +393,18 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 		// so we just pass "false"
 		poolID, poolIP, meta, err := ipam.RequestPool(addressSpace, config.Subnet, config.Range, ipamOpts, false)
 		if err != nil {
-			return ErrFailedPoolRequest{config.Subnet, config.Range, err}
+			if _, ok := err.(types.BadRequestError); ok {
+				return errors.ErrInvalidSpec("invalid network spec: %v", err)
+			}
+			if err == ipamapi.ErrPoolOverlap {
+				errors.ErrResourceInUse("pool",
+					fmt.Sprintf("with subnet %v and range %v", config.Subnet, config.Range),
+				)
+			}
+			if _, ok := err.(types.NoServiceError); ok {
+				return errors.ErrResourceExhausted("pools", err.Error())
+			}
+			return errors.ErrInternal("error requesting pool with ipam %v: %v", ipamName, err)
 		}
 		local.pools[poolIP.String()] = poolID
 		// The IPAM contract allows the IPAM driver to autonomously provide a
@@ -398,14 +420,10 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 
 		if gws, ok := meta[netlabel.Gateway]; ok {
 			if ip, gwIP, err = net.ParseCIDR(gws); err != nil {
-				return ErrBustedIPAM{
-					ipamName,
-					n.ID,
-					fmt.Errorf(
-						"can't parse gateway address (%v) returned by the ipam driver: %v",
-						gws, err,
-					),
-				}
+				return errors.ErrInternal(
+					"can't parse gateway address (%v) returned by the ipam driver: %v",
+					gws, err,
+				)
 			}
 			gwIP.IP = ip
 		}
@@ -416,7 +434,12 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 		if config.Gateway != "" || gwIP == nil {
 			gwIP, _, err = ipam.RequestAddress(poolID, net.ParseIP(config.Gateway), ipamOpts)
 			if err != nil {
-				return ErrFailedAddressRequest{config.Gateway, err}
+				if err == ipamapi.ErrIPAlreadyAllocated {
+					return errors.ErrResourceInUse("ip", config.Gateway)
+				}
+				return errors.ErrInternal(
+					"error requesting gateway ip %v: %v", config.Gateway, err,
+				)
 			}
 		}
 		if config.Subnet == "" {
@@ -479,7 +502,7 @@ func (a *allocator) AllocateVIPs(endpoint *api.Endpoint, networkIDs []string) (r
 	// network is allocated
 	for _, nwid := range networkIDs {
 		if _, ok := a.networks[nwid]; !ok {
-			return ErrNetworkNotAllocated{nwid}
+			return errors.ErrDependencyNotAllocated("network", nwid)
 		}
 	}
 
@@ -567,12 +590,12 @@ allocateLoop:
 			// and we'll go on to the next one. if we get any other error,
 			// that's fatal, so we'll return it and clean up
 			if err != ipamapi.ErrNoAvailableIPs {
-				return ErrFailedAddressRequest{"new", err}
+				return errors.ErrInternal("error allocating new IP address: %v", err)
 			}
 		}
 		// if we get here, that means we've tried every pool on the network,
 		// and all of them are exhausted
-		return ErrFailedAddressRequest{"new", ipamapi.ErrNoAvailableIPs}
+		return errors.ErrResourceExhausted("ip address", "no IPs remaining for network %v", nwid)
 	}
 
 	// now we've allocated every new vip. Add them all to our held over VIPs,
@@ -639,7 +662,7 @@ func (a *allocator) AllocateAttachments(configs []*api.NetworkAttachmentConfig) 
 		// updated, we'd have a lot more headaches.
 		local, ok := a.networks[config.Target]
 		if !ok {
-			return nil, ErrNetworkNotAllocated{config.Target}
+			return nil, errors.ErrDependencyNotAllocated("network", config.Target)
 		}
 
 		attachment := &api.NetworkAttachment{
@@ -673,13 +696,14 @@ func (a *allocator) AllocateAttachments(configs []*api.NetworkAttachmentConfig) 
 				if err != nil {
 					requestIP = net.ParseIP(address)
 					if requestIP == nil {
-						return nil, ErrInvalidAddress{address}
+						return nil, errors.ErrInvalidSpec("address %v is not valid", address)
 					}
 				}
 			}
 			// now that we've got the IP address in a usable form, try
 			// reserving it. we will need to try for each pool
 			for _, poolID := range local.pools {
+				var ip *net.IPNet
 				ip, _, err := ipam.RequestAddress(poolID, requestIP, ipamOpts)
 				if err == nil {
 					// we only want 1 address per task. so, once we've found a
@@ -695,9 +719,25 @@ func (a *allocator) AllocateAttachments(configs []*api.NetworkAttachmentConfig) 
 				if err == ipamapi.ErrIPOutOfRange || err == ipamapi.ErrNoAvailableIPs {
 					continue
 				}
+				if err == ipamapi.ErrIPAlreadyAllocated {
+					return nil, errors.ErrResourceInUse("ip", requestIP.String())
+				}
 				// if we get any other error, bail out because this address
 				// isn't going to work
-				return nil, ErrFailedAddressRequest{address, err}
+				return nil, errors.ErrInternal("error requesting address %v: %v", address, err)
+			}
+			// if we get through this whole loop without exiting, it means that
+			// either the IP address is out of range of the network's pools, or
+			// there were addresses remaining
+
+			// if we didn't request any particular address, it means there were
+			// no IP addresses available and the resource is exhausted
+			if address == "" {
+				return nil, errors.ErrResourceExhausted(
+					"ip addresses",
+					"no ip addresses remain in any pool for network %v",
+					local.nw.ID,
+				)
 			}
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/docker/libnetwork/netlabel"
 
 	"github.com/docker/swarmkit/api"
+	"github.com/docker/swarmkit/manager/allocator/network/errors"
 
 	. "github.com/docker/swarmkit/manager/allocator/network/ipam"
 
@@ -268,10 +269,10 @@ var _ = Describe("ipam.Allocator", func() {
 
 				err = a.Restore([]*api.Network{network}, nil, nil)
 			})
-			It("should return ErrInvalidIPAM", func() {
+			It("should return ErrBadState", func() {
 				Expect(err).To(HaveOccurred())
-				Expect(err).To(WithTransform(IsErrInvalidIPAM, BeTrue()))
-				Expect(err.Error()).To(Equal("ipam driver doesnotexist for network net1 is not valid"))
+				Expect(err).To(WithTransform(errors.IsErrBadState, BeTrue()))
+				// TODO(dperny): Expect(err.Error()).To(Equal("ipam driver doesnotexist for network net1 is not valid"))
 			})
 		})
 		Context("when the IPAM fails to return a default address space", func() {
@@ -304,10 +305,10 @@ var _ = Describe("ipam.Allocator", func() {
 				}
 				err = a.Restore([]*api.Network{network}, nil, nil)
 			})
-			It("should return ErrBustedIPAM", func() {
+			It("should return ErrInternal", func() {
 				Expect(err).To(HaveOccurred())
-				Expect(err).To(WithTransform(IsErrBustedIPAM, BeTrue()))
-				Expect(err.Error()).To(Equal("ipam error from driver addressSpaceFails on network net2: failed"))
+				Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
+				// TODO(dperny): Expect(err.Error()).To(Equal("ipam error from driver addressSpaceFails on network net2: failed"))
 			})
 		})
 		Context("when objects are fully allocated", func() {
@@ -481,10 +482,10 @@ var _ = Describe("ipam.Allocator", func() {
 				a.Restore([]*api.Network{network}, nil, nil)
 				err = a.AllocateNetwork(network)
 			})
-			It("should return ErrNetworkAllocated", func() {
+			It("should return ErrAlreadyAllocated", func() {
 				Expect(err).To(HaveOccurred())
-				Expect(err).To(WithTransform(IsErrNetworkAllocated, BeTrue()))
-				Expect(err.Error()).To(Equal("network testID1 is already allocated and network updates are not supported"))
+				Expect(err).To(WithTransform(errors.IsErrAlreadyAllocated, BeTrue()))
+				// Expect(err.Error()).To(Equal("network testID1 is already allocated and network updates are not supported"))
 			})
 		})
 		Describe("a valid, correct allocation", func() {
@@ -741,10 +742,10 @@ var _ = Describe("ipam.Allocator", func() {
 					nwCopy = network.Copy()
 					err = a.AllocateNetwork(network)
 				})
-				It("should fail with ErrInvalidIPAM", func() {
+				It("should fail with ErrInvalidSpec", func() {
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrInvalidIPAM, BeTrue()))
-					Expect(err.Error()).To(Equal("ipam driver invalid for network net1 is not valid"))
+					Expect(err).To(WithTransform(errors.IsErrInvalidSpec, BeTrue()))
+					// TODO Expect(err.Error()).To(Equal("ipam driver invalid for network net1 is not valid"))
 				})
 				It("should not alter the network object", func() {
 					Expect(network).To(Equal(nwCopy))
@@ -769,10 +770,10 @@ var _ = Describe("ipam.Allocator", func() {
 					}
 					err = a.AllocateNetwork(net)
 				})
-				It("should return ErrBustedIPAM", func() {
+				It("should return ErrInternal", func() {
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrBustedIPAM, BeTrue()))
-					Expect(err.Error()).To(Equal("ipam error from driver addressSpaceFails on network net2: failed"))
+					Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
+					// Expect(err.Error()).To(Equal("ipam error from driver addressSpaceFails on network net2: failed"))
 				})
 			})
 			Context("when the pool request fails", func() {
@@ -803,11 +804,11 @@ var _ = Describe("ipam.Allocator", func() {
 				AfterEach(func() {
 					delete(reg.ipams, "poolfails")
 				})
-				It("should fail with ErrFailedPoolRequest", func() {
+				It("should fail with ErrInternal", func() {
 					Expect(wasCalled).To(BeTrue())
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrFailedPoolRequest, BeTrue()))
-					Expect(err.Error()).To(Equal("requesting pool (subnet: \"\", range: \"\") returned error: failed"))
+					Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
+					// Expect(err.Error()).To(Equal("requesting pool (subnet: \"\", range: \"\") returned error: failed"))
 				})
 			})
 			Context("when the IPAM driver returns an invalid gateway address", func() {
@@ -844,10 +845,10 @@ var _ = Describe("ipam.Allocator", func() {
 				AfterEach(func() {
 					delete(reg.ipams, "default")
 				})
-				It("should return ErrBustedIPAM", func() {
+				It("should return ErrInternal", func() {
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrBustedIPAM, BeTrue()))
-					Expect(err.Error()).To(Equal("ipam error from driver default on network net1: can't parse gateway address (notvalid) returned by the ipam driver: invalid CIDR address: notvalid"))
+					Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
+					// TODO Expect(err.Error()).To(Equal("ipam error from driver default on network net1: can't parse gateway address (notvalid) returned by the ipam driver: invalid CIDR address: notvalid"))
 				})
 			})
 			Context("when requesting a gateway address fails", func() {
@@ -885,10 +886,10 @@ var _ = Describe("ipam.Allocator", func() {
 				AfterEach(func() {
 					delete(reg.ipams, "default")
 				})
-				It("should return ErrFailedAddressRequest", func() {
+				It("should return ErrInternal", func() {
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
-					Expect(err.Error()).To(Equal("requesting address 192.168.2.11 failed: failed"))
+					Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
+					// Expect(err.Error()).To(Equal("requesting address 192.168.2.11 failed: failed"))
 				})
 			})
 			Context("when multiple configs are specified, and a later one fails", func() {
@@ -952,9 +953,9 @@ var _ = Describe("ipam.Allocator", func() {
 				JustBeforeEach(func() {
 					err = a.AllocateNetwork(network)
 				})
-				It("should fail with ErrFailedAddressRequest", func() {
+				It("should fail with ErrInternal", func() {
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
+					Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
 				})
 				It("should not alter the network object", func() {
 					Expect(network).To(Equal(nwCopy))
@@ -965,22 +966,15 @@ var _ = Describe("ipam.Allocator", func() {
 				It("should release 1 address", func() {
 					Expect(addressesReleased).To(Equal(1))
 				})
-				Context("when a double fault occurs releasing pools", func() {
+				Context("when another error occurs releasing pools", func() {
 					BeforeEach(func() {
 						mock.releasePoolFunc = func(_ string) error {
 							return fmt.Errorf("failed")
 						}
 					})
-					It("should fail with ErrDoubleFault", func() {
+					It("should fail with ErrInternal", func() {
 						Expect(err).To(HaveOccurred())
-						Expect(err).To(WithTransform(IsErrDoubleFault, BeTrue()))
-						Expect(err.Error()).To(Equal(
-							"double fault: an error occurred while handling error requesting address 192.168.2.108 failed: failed: failed"))
-						e := err.(ErrDoubleFault)
-						Expect(e.Original()).ToNot(BeNil())
-						Expect(e.Original()).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
-						Expect(e.New()).ToNot(BeNil())
-						Expect(e.New()).To(Equal(fmt.Errorf("failed")))
+						Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
 					})
 				})
 				Context("when a double fault occurs releasing addresses", func() {
@@ -989,14 +983,9 @@ var _ = Describe("ipam.Allocator", func() {
 							return fmt.Errorf("failed")
 						}
 					})
-					It("should fail with ErrDoubleFault", func() {
+					It("should fail with ErrInternal", func() {
 						Expect(err).To(HaveOccurred())
-						Expect(err).To(WithTransform(IsErrDoubleFault, BeTrue()))
-						e := err.(ErrDoubleFault)
-						Expect(e.Original()).ToNot(BeNil())
-						Expect(e.Original()).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
-						Expect(e.New()).ToNot(BeNil())
-						Expect(e.New()).To(Equal(fmt.Errorf("failed")))
+						Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
 					})
 				})
 			})
@@ -1104,10 +1093,10 @@ var _ = Describe("ipam.Allocator", func() {
 					e := &api.Endpoint{}
 					err = a.AllocateVIPs(e, []string{"notreal"})
 				})
-				It("should fail with ErrNetworkNotAllocated", func() {
+				It("should fail with ErrDependencyNotAllocated", func() {
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrNetworkNotAllocated, BeTrue()))
-					Expect(err.Error()).To(Equal("network notreal is not allocated"))
+					Expect(err).To(WithTransform(errors.IsErrDependencyNotAllocated, BeTrue()))
+					Expect(err.Error()).To(Equal("network notreal depended on by object is not allocated"))
 				})
 			})
 			Context("to a new endpoint", func() {
@@ -1306,7 +1295,7 @@ var _ = Describe("ipam.Allocator", func() {
 				})
 				It("should return an error", func() {
 					Expect(err).To(HaveOccurred())
-					Expect(err).To(WithTransform(IsErrFailedAddressRequest, BeTrue()))
+					Expect(err).To(WithTransform(errors.IsErrInternal, BeTrue()))
 				})
 			})
 		})
