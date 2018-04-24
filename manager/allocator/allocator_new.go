@@ -2,6 +2,7 @@ package allocator
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"time"
 
@@ -12,41 +13,28 @@ import (
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/log"
 	"github.com/docker/swarmkit/manager/state/store"
+	"github.com/docker/swarmkit/protobuf/ptypes"
 )
 
 const (
-	BatchSizeThreshold = 100
-	BatchTimeThreshold = 100 * time.Millisecond
+	BatchSizeThreshold     = 100
+	BatchTimeThreshold     = 100 * time.Millisecond
+	AllocatedStatusMessage = "pending task scheduling"
 )
 
-type apiobj int
-
-const (
-	_ apiobj = iota
-	networkObj
-	serviceObj
-	taskObj
-	nodeObj
-)
-
-type pendingAllocation struct {
-	obj apiobj
-	id  string
-}
-
-type Allocator struct {
+type NewAllocator struct {
 	store   *store.MemoryStore
 	network network.Allocator
 }
 
-func New(store *store.MemoryStore, pg plugingetter.PluginGetter) *Allocator {
-	a := &Allocator{
+func New(store *store.MemoryStore, pg plugingetter.PluginGetter) *NewAllocator {
+	a := &NewAllocator{
 		store:   store,
 		network: network.NewAllocator(pg),
 	}
 }
 
-func Run(ctx context.Context) error {
+func (a *NewAllocator) Run(ctx context.Context) error {
 	// General overview of how this function works:
 	//
 	// Run is a shim between the asynchronous store interface, and the
@@ -82,50 +70,37 @@ func Run(ctx context.Context) error {
 	// defer canceling the context, so that anything waiting on it will exit
 	// when this routine exits.
 	defer c()
+	ctx = log.WithModule(ctx, "allocator")
 
 	// pending allocations
-	pendingAllocationsIn, pendingAllocationsOut := workQueue(ctx)
+	pendingNetworksIn, pendingNetworksOut := workPool(ctx)
+	// pendingServicesIn, pendingServicesOut := workPool(ctx)
+	pendingTasksIn, pendingTasksOut := workPool(ctx)
 
-	ctx = log.WithModule(ctx, "allocator")
+	// we want to spend as little time as possible in transactions, because
+	// transactions stop the whole cluster, so we're going to grab the lists
+	// and then get out
+	var (
+		networks []*api.Network
+		services []*api.Service
+		tasks    []*api.Task
+	)
 	watch, cancel, err := store.ViewAndWatch(store,
 		func(tx store.ReadTx) error {
-			networks, err := store.FindNetworks(tx, store.All)
+			var err error
+			networks, err = store.FindNetworks(tx, store.All)
 			if err != nil {
 				// TODO(dperny): handle errors
 			}
-			services, err := store.FindService(tx, store.All)
+			services, err = store.FindService(tx, store.All)
 			if err != nil {
 				// TODO(dperny): handle errors
 			}
-			tasks, err := store.FindTasks(tx, store.All)
-			if err != nil {
-				// TODO(dperny): handle errors
-			}
-			nodes, err := store.FindNodes(tx, store.All)
+			tasks, err = store.FindTasks(tx, store.All)
 			if err != nil {
 				// TODO(dperny): handle errors
 			}
 
-			if err := a.network.Restore(networks, services, tasks, nodes); err != nil {
-				// TODO(dperny): handle errors
-			}
-			for _, network := range networks {
-				pendingAllocationsIn <- pendingAllocation{networkObj, network.ID}
-			}
-			endpoints := make([]*api.Endpoint, 0, len(services))
-			for _, service := range services {
-				pendingAllocationsIn <- pendingAllocation{serviceObj, service.ID}
-			}
-			attachments := []*api.NetworkAttachment{}
-			for _, task := range tasks {
-				pendingAllocationsIn <- pendingAllocation{taskObj, task.ID}
-			}
-			for _, node := range nodes {
-				pendingAllocationsIn <- pendingAllocation{nodeObj, node.ID}
-			}
-			if err := a.network.Restore(networks, endpoints, attachments); err != nil {
-				// TODO(dperny) error handling
-			}
 		},
 		api.EventCreateNetwork{},
 		api.EventUpdateNetwork{},
@@ -136,9 +111,12 @@ func Run(ctx context.Context) error {
 		api.EventCreateTask{},
 		api.EventUpdateTask{},
 		api.EventDeleteTask{},
-		api.EventCreateNode{},
-		api.EventUpdateNode{},
-		api.EventDeleteNode{},
+		// TODO(dperny): none of the rest of swarmkit or the docker api seems
+		// to support nodes, so in the interest of laziness i'm going to leave
+		// node allocation unimplemented for now
+		// api.EventCreateNode{},
+		// api.EventUpdateNode{},
+		// api.EventDeleteNode{},
 	)
 	if err != nil {
 		// TODO(dperny): error handling
@@ -154,93 +132,135 @@ func Run(ctx context.Context) error {
 		}
 	}()
 
+	// now restore the local state
+	if err := a.network.Restore(networks, services, tasks, nil); err != nil {
+		// TODO(dperny): handle errors
+	}
+
+	// Add all of the objects currently in the store to our working pool. Those
+	// currently allocated should pass quickly and silently, and those not yet
+	// allocated will be allocated
+	for _, network := range networks {
+		// select on context.Done so we can't get blocked on the work pool
+		select {
+		case <-ctx.Done():
+		case pendingNetworksIn <- network.ID:
+		}
+	}
+	for _, task := range tasks {
+		select {
+		case <-ctx.Done():
+		case pendingTasksIn <- task.ID:
+		}
+	}
+
 	// this goroutine handles incoming work.
 	go func() {
-		// This routine is... pretty non-optimal. It'll probably have to be
-		// optmizied before we can ever ship. It grabs a write lock on the raft
-		// database for every allocation, serially.
-		//
-		// In addition, there are some pitfalls related to dependencies. The
-		// pass through the work pool means that the order of pending
-		// allocations is randomized. We might try to allocate an attachment,
-		// for example, before its network has been allocated. Normally, this
-		// isn't problem, but
-		//
-		// Some ideas for optimizations:
-		// - Batch allocations. Follow the pattern in other components of only
-		//   doing operations after a time or size threshold has been reached.
-		// - Do read-copy-update. Because we totally own the network fields, as
-		//   long as the object still exists before we write it, and is still
-		//   in a desired state requiring allocation, we're fine to have other
-		//   components operate on it. The downside is we don't really have
-		//   control over what happens in the meantime
-		// - Lazy allocate. Only watch for updates on Tasks and Nodes. Before
-		//   we allocate a task or node, make sure that its dependent network
-		//   and service objects are fully allocated.
-		// - Batch-allocate tasks. If we get a create event for a task, grab
-		//   all of the other new tasks for the service and allocate them all
-		//   at once in the same transaction (or batch them in separate
-		//   transactions).
-		// Some more far-fetched ideas:
-		// - Upgradeable locking in transactions?
-		//
-		// The nice part about all of these ideas is that they're entirely
-		// under the purview of THIS object. you don't have to go diving
-		// through the code making a bunch of changes along the way.
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case pending := <-pendingAllocationsOut:
-				// TODO(dperny): what happens if the raft write fails??? we
-				// need to roll back an allocation?
-				if err := store.Update(func(tx store.Tx) {
-					switch pending.obj {
-					case networkObj:
-						n := store.GetNetwork(tx, pending.id)
-						if n == nil {
-							return nil
-						}
-						if err := a.network.AllocateNetwork(n); err != nil {
-							// TODO(dperny): better error handling
-							return err
-						}
-						return store.UpdateNetwork(tx, n)
-					case serviceObj:
-						s := store.GetService(tx, pending.id)
-						if s == nil {
-							return nil
-						}
-						if err := a.network.AllocateService(s); err != nil {
-							return err
-						}
-						return store.UpdateService(tx, s)
-					case taskObj:
-						t := store.GetTask(tx, pending.id)
-						if t == nil {
-							return nil
-						}
-						if err := a.network.AllocateTask(t); err != nil {
-							return err
-						}
-						return store.UpdateTask(tx, s)
-					case nodeObj:
-						n := store.GetNode(tx, pending.id)
-						if n == nil {
-							return nil
-						}
-						if err := a.network.AllocateNode(n); err != nil {
-							return err
-						}
-						return store.UpdateNode(tx, n)
+			case networkID := <-pendingNetworksOut:
+				// keep track of the allocation error separately. if the
+				// network allocator returns an error, it should not alter
+				// state, and we can retry allocation. if there is a
+				// transaction error, then we have some state allocated
+				// locally, but synced up to the store, and we have to handle
+				// that separately. There is no good way to roll back an
+				// allocation
+				var allocationErr error
+				if err := a.store.Update(func(tx store.Tx) error {
+					nw := store.GetNetwork(tx, networkID)
+					if nw == nil {
+						return nil
+					}
+					if err := a.network.AllocateNetwork(nw); err != nil {
+						allocationErr = err
+						return err
 					}
 				}); err != nil {
-					// don't block on waiting for pendingAllocations to recieve
-					// this allocation
-					select {
-					case <-ctx.Done():
-						return
-					case pendingAllocationsIn <- pending:
+					if allocationErr != nil {
+						// if it's an allocation error, then we can safely just
+						// add the object back to the work pool and try it
+						// again later
+						pendingNetworksIn <- networkID
+					} else {
+						// otherwise, we need to set up some way of retrying
+						// the transaction. chances are if the tx fails, it's
+						// the end of our tenure as leader, but not always
+						// TODO(dperny): do this
+					}
+				}
+			case taskID := <-pendingTasksOut:
+				// tasks are more complicated than networks, because they have
+				// a dependency on services and networks, which must be
+				// allocated first. However, we can guarantee that task
+				// dependencies are fully allocated by first allocating their
+				// services and tasks.
+				var (
+					allocationErr error
+				)
+				// TODO(dperny): add some fancy intelligent logic for
+				// allocating many tasks at once after a service update
+				if err := a.store.Update(func(tx store.Tx) {
+					task := store.GetTask(tx, taskID)
+					// if the task is nil, it was probably deleted before we
+					// serviced it, so we're done
+					if task == nil {
+						return nil
+					}
+					// deallocating the task
+					if task.Status.State >= api.TaskStateCompleted {
+						a.network.DeallocateTask(task)
+						if err := store.UpdateTask(a, task); err != nil {
+							return err
+						}
+						return nil
+					}
+					// check if we're allocating new tasks
+					if task.Status.State == api.TaskStateNew && task.DesiredState == api.TaskStateRunning {
+						// if so, we're gonna allocate first the service
+						service := store.GetService(tx, task.ServiceID)
+						if service != nil {
+							serviceCopy := service.Copy()
+							if err := a.network.AllocateService(service); err != nil {
+								allocationErr = err
+								return err
+							}
+							// no need to commit a change if nothing changed
+							// TODO(dperny): maybe it's better to return
+							// something like an errAlreadyAllocated and check
+							// that, to see if no work is done...
+							if !reflect.DeepEqual(service, serviceCopy) {
+								if err := store.UpdateService(tx, service); err != nil {
+									return err
+								}
+							}
+						}
+						if err := a.network.AllocateTask(task); err != nil {
+							allocationErr = err
+							return err
+						}
+						// if allocation succeeded, advance the task state to
+						// PENDING
+						task.Status = api.TaskStatus{
+							State:     api.TaskStatePending,
+							Message:   AllocatedStatusMessage,
+							Timestamp: ptypes.MustTimestampProto(time.Now()),
+						}
+						if err := store.UpdateTask(tx, task); err != nil {
+							return err
+						}
+					}
+				}); err != nil {
+					if allocationErr != nil {
+						select {
+						case <-ctx.Done():
+						case pendingTasksIn <- taskID:
+						}
+					} else {
+						// TODO(dperny): handle transaction errors that aren't
+						// allocation errors
 					}
 				}
 			}
@@ -253,7 +273,6 @@ func Run(ctx context.Context) error {
 	// information. we'll get to it later.
 	go func() {
 		for {
-			var pending pendingAllocation
 			select {
 			case <-ctx.Done():
 				return
@@ -268,7 +287,10 @@ func Run(ctx context.Context) error {
 						n = ev.(api.EventUpdateNetwork).Network
 					}
 					if n != nil {
-						pending = pendingAllocation{networkObj, n.ID}
+						select {
+						case <-ctx.Done:
+						case pendingNetworksIn <- n.ID:
+						}
 					}
 				case api.EventDeleteNetwork:
 					// if the user deletes  the network, we don't have to do any
@@ -276,16 +298,6 @@ func Run(ctx context.Context) error {
 					// is already gone, deal with it
 					if ev.Network != nil {
 						a.network.DeallocateNetwork(ev.Network)
-					}
-				case api.EventCreateService, api.EventUpdateService:
-					var s *api.Service
-					if e, ok := ev.(api.EventCreateService); ok {
-						s = e.Service
-					} else {
-						s = ev.(api.EventUpdateService).Service
-					}
-					if s != nil {
-						pending = pendingAllocation{serviceObj, s.ID}
 					}
 				case api.EventDeleteService:
 					if ev.Service != nil {
@@ -299,44 +311,51 @@ func Run(ctx context.Context) error {
 						t = ev.(api.EventUpdateTask).Task
 					}
 					if t != nil {
-						pending = pendingAllocation{taskObj, t.ID}
+						// the only check we'll do here is if a task is NEW, or
+						// if it's in a terminal state, because those are the
+						// only tasks we care about, and this will let us skip
+						// a transaction in the work handler where we'd have to
+						// look this up.
+
+						// first, is the task in the NEW state, and desired to
+						// be RUNNING? then we should allocate the task.
+						if (t.Status.State == api.TaskStateNew &&
+							t.DesiredState == api.TaskStateRunning) ||
+							// otherwise, is the task in a terminal state? in
+							// that case, the task will need to be deallocated
+							(t.Status.State >= api.TaskStateCompleted) {
+							select {
+							case <-ctx.Done:
+							case pendingTasksIn <- t.ID:
+							}
+						}
 					}
 				case api.EventDeleteTask:
 					if ev.Task != nil {
 						a.network.DeallocateTask(ev.Task)
 					}
-				case api.EventCreateNode, api.EventUpdateNode:
-					var n *api.Node
-					if e, ok := ev.(api.EventCreateNode); ok {
-						n = e.Node
-					} else {
-						n = ev.(api.EventUpdateNode).Node
-					}
-					if n != nil {
-						pending = pendingAllocation{nodeObj, n.ID}
-					}
-				case api.EventDeleteNode:
-					if ev.Node != nil {
-						a.network.DeallocateNode(ev.Node)
-					}
-				}
-			}
-			if pending != (pendingAllocation{}) {
-				// avoid blocking on a send to pendingAllocationsIn
-				select {
-				case <-ctx.Done():
-					return
-				case pendingAllocationsIn <- pending:
 				}
 			}
 		}
 	}()
 }
 
-// workQueue essentially functions as a way to aggregate and deduplicate
-// incoming work
-func workQueue(ctx context.Context) (chan<- string, <-chan string) {
-	work := map[pendingAllocation]struct{}{}
+// workPool essentially functions as a way to aggregate and deduplicate
+// incoming work. it handles the business of issuing new work
+//
+// It returns 2 channels
+// - the first is an inbox, into which new work can be sent
+// - the second is an outbox, from which work can be retrieved
+//
+// in the context of the allocator, we do not need a way to delete, because
+// when we actually go to perform allocation, we'll be looking up the ID and
+// find nothing.
+//
+// it is not safe to write to the workPool without selecting on channel write
+// and ctx.Done(), as the work pool may be closed at any time an stop accepting
+// new work.
+func workPool(ctx context.Context) (chan<- string, <-chan string) {
+	work := map[string]struct{}{}
 	// make a buffered channel for the inbox so readers are a bit less likely
 	// to block
 	inbox := make(chan string, 1)
@@ -349,16 +368,12 @@ func workQueue(ctx context.Context) (chan<- string, <-chan string) {
 			// we only select on the channel send if there is work
 			if len(work) > 0 {
 				select {
-				case <-ctx.Done():
-					return
 				case in := <-inbox:
 					work[in] = struct{}{}
 				case outbox <- pick(work):
 				}
 			} else {
 				select {
-				case <-ctx.Done():
-					return
 				case in := <-inbox:
 					work[in] = struct{}{}
 				}

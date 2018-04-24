@@ -1,11 +1,13 @@
 package network
 
 import (
+	"fmt"
+
 	"github./docker/docker/pkg/plugingetter"
 	"github.com/docker/libnetwork/drvregistry"
 
 	// the allocator types
-	"github.com/docker/swarmkit/manager/allocator/network/drivers"
+	"github.com/docker/swarmkit/manager/allocator/network/driver"
 	"github.com/docker/swarmkit/manager/allocator/network/ipam"
 	"github.com/docker/swarmkit/manager/allocator/network/port"
 
@@ -13,7 +15,7 @@ import (
 )
 
 type DrvRegistry interface {
-	drivers.DrvRegistry
+	driver.DrvRegistry
 	ipam.DrvRegistry
 }
 
@@ -29,8 +31,8 @@ type Allocator interface {
 	AllocateTask(*api.Task) error
 	DeallocateTask(*api.Task) error
 
-	AllocateNode(*api.Node) error
-	DeallocateNode(*api.Node) error
+	// AllocateNode(*api.Node) error
+	// DeallocateNode(*api.Node) error
 }
 
 type allocator struct {
@@ -38,15 +40,16 @@ type allocator struct {
 	// fulfilled, we need to keep track of what we have allocated already
 	// networks maps network ids to network objects
 	networks map[string]*api.Network
-	// endpoints maps service ids to endpoint objects
-	endpoints map[string]*api.Endpoint
+	// keeps a map of IDs to service objects
+	services map[string]*api.Service
 	// attachments don't need to be kept track of, because nothing depends on
-	// them
+	// them. additionally, tasks are never updated, only allocated once, so we
+	// don't need to worry about returning errAlreadyAllocated
 
-	reg     DrvRegistry
-	ipam    ipam.Allocator
-	drivers drivers.Allocator
-	port    port.Allocator
+	reg    DrvRegistry
+	ipam   ipam.Allocator
+	driver driver.Allocator
+	port   port.Allocator
 }
 
 // NewAllocator creates and returns a new, ready-to use allocator for all
@@ -105,12 +108,53 @@ func (a *allocator) Restore(networks []*api.Network, servoices []*api.Service, t
 // Allocate network takes the given network and allocates it to match the
 // provided network spec
 func (a *allocator) AllocateNetwork(n *api.Network) error {
+	// first, figure out if the network is node-local, so we know whether or
+	// not to run the IPAM allocator
+	if !a.driver.IsNetworkNodeLocal(n) {
+		if err := a.ipam.AllocateNetwork(n); err != nil {
+			// TODO(dperny): structure errors
+			return err
+		}
+	}
+	if err := a.driver.Allocate(n); err != nil {
+		// TODO(dperny): structure errors
+		return err
+	}
 }
 
 func (a *allocator) DeallocateNetwork(n *api.Network) error {
+	// we don't need to worry about whether or not the network is node-local
+	// for deallocation because it won't have ipam data anyway
+	if err := a.driver.Deallocate(n); err != nil {
+		// TODO(dperny): structure errors
+		return err
+	}
+	a.ipam.DeallocateNetwork(n)
+	return nil
 }
 
 func (a *allocator) AllocateService(service *api.Service) error {
+	// first, check if we have already allocated this service. Do this by
+	// checking the service map for the service. Then, if it exists, check if
+	// the spec version is the same.
+	//
+	// we only update the services map entry with the newer service version if
+	// allocation succeeds, so if the spec version hasn't changed, then the
+	// service hasn't changed.
+	if oldService, ok := a.services[service.ID]; ok {
+		var oldVersion, newVersion uint64
+		// we need to do this dumb dance because for some crazy reason
+		// SpecVersion is nullable
+		if oldService.SpecVersion != nil {
+			oldVersion = oldService.SpecVersion.Index
+		}
+		if service.SpecVersion != nil {
+			newVersion = service.SpecVersion.Index
+		}
+		if oldVersion == newVersion {
+			return errAlreadyAllocated{}
+		}
+	}
 	// handle the cases where service bits are nil
 	endpoint := service.Endpoint
 	if endpoint == nil {
@@ -137,23 +181,44 @@ func (a *allocator) AllocateService(service *api.Service) error {
 	for _, nw := range networks {
 		ids = append(ids, nw.ID)
 	}
-	if err := a.ipam.AllocateVIPs(endpoint, endpointSpec, ids); err != nil {
+	if err := a.ipam.AllocateVIPs(endpoint, ids); err != nil {
 		// TODO(dperny): error handling
 	}
 	proposal.Commit()
 	service.Endpoint.Ports = proposal.Ports()
 	service.Endpoint = endpoint
 	service.Endpoint.Spec = endpointSpec
+	// save the service endpoint to the endpoints map
+	a.services[service.ID] = service
 
 	return nil
 }
 
 func (a *allocator) AllocateTask(task *api.Task) error {
-	// Task has an endpoint, but that endpoint is just a copy of the service's
-	// endpoint at task creation time. The service might not be up-to-date on
-	// its allocation yet, and this endpoint might not be up-to-date. The end
-	// result is that we're gonna
+	// if the task has an empty service ID, it doesn't depend on the service
+	// being allocated.
+	if task.ServiceID != "" {
+		service, ok := a.services[task.ServiceID]
+		if !ok {
+			return errDependencyNotAllocated{"service", task.ServiceID}
+		}
+		// set the task endpoint to match the service endpoint
+		task.Endpoint = service.Endpoint
+	}
+	// TODO(dperny): have attachments return a structure error from which we
+	// can retrieve the network ID
+	attachments, err := a.ipam.AllocateAttachments(task.Spec.Networks)
+	if err != nil {
+		return err
+	}
+	task.Networks = attachments
+	return nil
 }
 
-func (a *allocator) AllocateNode(node *api.Node) error {
+func (a *allocator) DeallocateTask(task *api.Task) error {
+	a.ipam.DeallocateAttachments(task.Networks)
+	for _, attachment := range task.Networks {
+		// remove the addresses after we've deallocated every attachment
+		attachment.Addresses = nil
+	}
 }
