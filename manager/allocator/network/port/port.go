@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/docker/swarmkit/api"
+	"github.com/docker/swarmkit/manager/allocator/network/errors"
 )
 
 const (
@@ -24,66 +25,6 @@ const (
 	// ports allocated so far regardless of whether it was user defined or not.
 	masterPortEnd uint32 = 65535
 )
-
-// ErrPortInUse is an error type returned if one of the requested ports is
-// already in use by something else.
-type ErrPortInUse struct {
-	port
-}
-
-// Error returns a formatted message explaining what published port is in use
-func (e ErrPortInUse) Error() string {
-	return fmt.Sprintf("port %d/%s is already reserved", e.port.port, e.port.protocol)
-}
-
-// IsErrPortInUse returns true if the error is of type ErrPortInUse
-func IsErrPortInUse(e error) bool {
-	_, ok := e.(ErrPortInUse)
-	return ok
-}
-
-// ErrPortSpaceExhausted is the error type returned when the dynamically
-// allocated port space for a given protocol is exhausted
-type ErrPortSpaceExhausted struct {
-	protocol api.PortConfig_Protocol
-}
-
-// Error returns a formatted message explaining what protocol is exhausted, and
-// what the dynamic port range is
-func (e ErrPortSpaceExhausted) Error() string {
-	return fmt.Sprintf(
-		"the dynamically allocated port space [%v,%v] is exhausted for protocol %v",
-		DynamicPortStart,
-		DynamicPortEnd,
-		e.protocol,
-	)
-}
-
-// IsErrPortSpaceExhausted returns true if the error is of type
-// ErrPortSpaceExhausted
-func IsErrPortSpaceExhausted(e error) bool {
-	_, ok := e.(ErrPortSpaceExhausted)
-	return ok
-}
-
-// ErrInvalidEndpoint is returned if the endpoint passed to Allocate or
-// Deallocate is somehow not valid. The error message will contain the problem.
-// It is a catchall for any errors not otherwise covered.
-type ErrInvalidEndpoint struct {
-	problem string
-}
-
-// Error returns a formatted message explaining what the problem is
-func (e ErrInvalidEndpoint) Error() string {
-	return e.problem
-}
-
-// IsErrInvalidEndpoint returns true if the provided error is of type
-// ErrInvalidEndpoint
-func IsErrInvalidEndpoint(e error) bool {
-	_, ok := e.(ErrInvalidEndpoint)
-	return ok
-}
 
 type Allocator interface {
 	Restore([]*api.Endpoint)
@@ -113,6 +54,12 @@ type port struct {
 	// protocol represented by this port space
 	protocol api.PortConfig_Protocol
 	port     uint32
+}
+
+// String is a quick implementation of the Stringer interface for the port
+// object so that we can pass it to string format calls with just %v
+func (p port) String() string {
+	return fmt.Sprintf("%v/%v", p.port, p.protocol)
 }
 
 // Proposal is the return value of Allocate and DeallocateEndpoint,
@@ -295,10 +242,10 @@ func (pa *allocator) Allocate(endpoint *api.Endpoint, spec *api.EndpointSpec) (P
 		// check if the published port or target port is off the end of the
 		// allowed port range
 		if spec.PublishedPort > masterPortEnd {
-			return nil, ErrInvalidEndpoint{fmt.Sprintf("published port %v isn't in the valid port range", spec.PublishedPort)}
+			return nil, errors.ErrInvalidSpec("published port %v isn't in the valid port range", spec.PublishedPort)
 		}
 		if spec.TargetPort > masterPortEnd {
-			return nil, ErrInvalidEndpoint{fmt.Sprintf("target port %v isn't in the valid port range", spec.TargetPort)}
+			return nil, errors.ErrInvalidSpec("target port %v isn't in the valid port range", spec.TargetPort)
 		}
 		// copy the port from the spec into the final ports list
 		finalPorts[i] = spec.Copy()
@@ -365,13 +312,13 @@ func (pa *allocator) Allocate(endpoint *api.Endpoint, spec *api.EndpointSpec) (P
 		if _, ok := pa.ports[portObj]; ok {
 			// check if we're deallocating this port
 			if _, ok := prop.deallocate[portObj]; !ok {
-				return nil, ErrPortInUse{portObj}
+				return nil, errors.ErrResourceInUse("port", portObj.String())
 			}
 		}
 		// also check that we haven't already tried to allocate this port for
 		// this particular endpoint
 		if _, ok := prop.allocate[portObj]; ok {
-			return nil, ErrPortInUse{portObj}
+			return nil, errors.ErrInvalidSpec("published port %v is assigned to more than 1 port config", portObj)
 		}
 
 		// now, mark this port as "in use" in the newPorts map.
@@ -425,7 +372,7 @@ ports:
 
 		// if we've gotten all the way through the whole range of dynamic
 		// ports, and there are no ports left, return an error
-		return nil, ErrPortSpaceExhausted{p.Protocol}
+		return nil, errors.ErrResourceExhausted("dynamic port space", "protocol "+p.Protocol.String())
 	}
 
 	// add the final ports to the proposal, and we're done

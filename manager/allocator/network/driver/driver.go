@@ -8,6 +8,7 @@ import (
 	"github.com/docker/libnetwork/driverapi"
 
 	"github.com/docker/swarmkit/api"
+	"github.com/docker/swarmkit/manager/allocator/network/errors"
 )
 
 const (
@@ -65,7 +66,7 @@ func (a *allocator) Restore(networks []*api.Network) error {
 		if n.DriverState != nil {
 			driver, caps, err := a.getDriver(n.DriverState.Name)
 			if err != nil {
-				return fmt.Errorf("error getting driver %v: %v", n.DriverState.Name, err)
+				return err
 			}
 			// if this is a local-scoped network, we don't need to restore any
 			// driver state, and we can go to the next network
@@ -78,18 +79,15 @@ func (a *allocator) Restore(networks []*api.Network) error {
 
 			ipamData, err := getIpamData(n)
 			if err != nil {
-				// TODO(dperny): structure errors
 				return err
 			}
-			// TODO(dperny): we should not get back driver state that doesn't
-			// match the driver state on the network object. I don't know what
-			// to do if we did, so I'm just ignoring the first return value.
 			_, err := d.driver.NetworkAllocate(n.ID, options, ipamdata, nil)
 			if err != nil {
 				// again, this error case should not occur, because we should
 				// not fail when we previously succeeded
-				// TODO(dperny): structure errors
-				return fmt.Errorf("error restoring driver state: %v", err)
+				// using ErrInternal instead of ErrBadState because the state
+				// is probably valid, but something else has gone wrong
+				return errors.ErrInternal("driver.NetworkAllocate call failed: %v", err)
 			}
 		}
 	}
@@ -110,8 +108,7 @@ func (a *allocator) Allocate(n *api.Network) error {
 	// retry dance, but we'll leave this in for safety's sake.
 	driver, caps, err := a.getDriver(driverName)
 	if err != nil {
-		// TODO(dperny) structure errors
-		return fmt.Errorf("error getting driver %v: %v", driverName, err)
+		return err
 	}
 	// No swarm-level allocation can be provided by the network driver for
 	// node-local networks. Only thing needed is populating the driver's name
@@ -137,7 +134,6 @@ func (a *allocator) Allocate(n *api.Network) error {
 
 	ipamData, err := getIpamData(n)
 	if err != nil {
-		// TODO(dperny): structure errors
 		return err
 	}
 	// now we have everything we need and can call NetworkAllocate. Note that
@@ -145,8 +141,7 @@ func (a *allocator) Allocate(n *api.Network) error {
 	// IPv6
 	ds, err := driver.NetworkAllocate(n.ID, options, ipamData, nil)
 	if err != nil {
-		// TODO(dperny): structure errors
-		return fmt.Errorf("error allocating network driver state: %v", err)
+		return errors.ErrInternal("driver.NetworkAllocate call failed: %v", err)
 	}
 
 	// finally, update the network object with the driver state we've obtained,
@@ -167,7 +162,6 @@ func (a *allocator) Deallocate(n *api.Network) error {
 	}
 	driver, caps, err := a.getDriver(n.DriverState.Name)
 	if err != nil {
-		// TODO(dperny): structure errors
 		return err
 	}
 	// if the driver is locally scoped, we also have nothing to do here
@@ -194,12 +188,14 @@ func (a *allocator) IsNetworkNodeLocal(n *api.Network) (bool, error) {
 		name = n.Spec.DriverConfig.Name
 	}
 	_, caps, err := a.getDriver(name)
-	// TODO(dperny): structure errors
 	return (caps != nil && caps.DataScope == datastore.LocalScope), err
 }
 
 // getDriver retrieves the network driver, attempting to load via the
 // PluginGetter if the first attempt to get it from the drvregistry fails
+//
+// getDriver returns structured errors from the allocator errors package,
+// meaning errors it returns can in turn be returned directly from the caller
 func (a *allocator) getDriver(name string) (driverapi.Driver, *driverapi.Capability, error) {
 	driver, caps := a.drvRegistry.Driver(name)
 	// if the first attempt to get the driver fails, it might not be loaded.
@@ -208,18 +204,19 @@ func (a *allocator) getDriver(name string) (driverapi.Driver, *driverapi.Capabil
 	if driver == nil {
 		pg := a.drvRegistry.GetPluginGetter()
 		if pg == nil {
-			// TODO(dperny) structure errors
-			return nil, nil, fmt.Errorf("plugingetter not initialized")
+			// This case should never happen
+			return nil, nil, errors.ErrInternal("plugingetter is not initialized")
 		}
 		_, err := pg.Get(name, driverapi.NetworkPluginEndpointType, plugingetter.Lookup)
 		if err != nil {
-			// TODO(dperny) structure errors
-			return nil, nil, fmt.Errorf("error getting from plugingetter: %v", err)
+			// I don't know what would cause this case to happen. will an error
+			// be returned if the plugin doesn't exist?
+			return nil, nil, errors.ErrInternal("plugingetter.Get failed")
 		}
 		driver, caps = a.drvRegistry.Driver(name)
 		// if the driver still is nil, then it just doesn't exist
 		if driver == nil {
-			return nil, nil, errNoSuchDriver{name}
+			return nil, nil, errors.ErrInvalidSpec("network driver %v cannot be found", name)
 		}
 	}
 	return driver, caps, nil
@@ -227,6 +224,9 @@ func (a *allocator) getDriver(name string) (driverapi.Driver, *driverapi.Capabil
 
 // getIpamData makes driverapi.IPAMData objects (for NetworkAllocate) from the
 // network spec
+//
+// getIpamData returns structured errors from the allocator errors package,
+// meaning errors it returns can in turn be returned directly from the caller
 func getIpamData(n *api.Network) ([]driverapi.IPAMData, error) {
 	ipamData := make([]driverapi.IPAMData, 0, len(n.IPAM.Configs))
 	for _, config := range n.IPAM.Configs {
@@ -239,8 +239,7 @@ func getIpamData(n *api.Network) ([]driverapi.IPAMData, error) {
 			// this is another bad error condition, because we should never
 			// have committed a network that had an invalid subnet in its ipam
 			// configs
-			// TODO(dperny): structure errors
-			return nil, fmt.Errorf("error parsing subnet (%v): %v", config.Subnet, err)
+			return nil, errors.ErrBadState("cannot parse subnet %v", config.Subnet)
 		}
 		gwIP := net.ParseIP(config.Gateway)
 		gwNet := &net.IPNet{
