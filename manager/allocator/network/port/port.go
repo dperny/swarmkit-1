@@ -204,6 +204,10 @@ func (pa *allocator) Deallocate(endpoint *api.Endpoint) Proposal {
 // to a new port that is being added. However, this behavior _is not tested_
 // and should _not_ be relied on as part of the API. It's a nice-to-have
 // implementation detail.
+//
+// Because I'm reluctant to alter what I have that already works, we will not
+// return ErrAlreadyAllocated if the endpoint is already allocated. Instead,
+// callers can use the AlreadyAllocated function from this package.
 func (pa *allocator) Allocate(endpoint *api.Endpoint, spec *api.EndpointSpec) (Proposal, error) {
 	// Ok, so Allocate is actually pretty tricky, because we do dynamic
 	// port allocation. This means if the user gives us no published port, we
@@ -404,4 +408,58 @@ func PortsMostlyEqual(some, other *api.PortConfig) bool {
 		some.Protocol == other.Protocol &&
 		// are the publish modes?
 		some.PublishMode == other.PublishMode
+}
+
+// AlreadyAllocated returns true if the endpoint's ports are already fully
+// allocated
+func AlreadyAllocated(endpoint *api.Endpoint, spec *api.EndpointSpec) bool {
+	// handle some simple cases involving nil endpoints and spec
+	if endpoint == nil && spec == nil {
+		return true
+	}
+	// if the endpoint is nil but the spec is not, that means we haven't
+	// allocated yet
+	if endpoint == nil && spec != nil {
+		return false
+	}
+
+	// if the endpoint's spec is nil but the spec is not, then that also means
+	// we haven't allocated yet
+	if endpoint.Spec == nil && spec != nil {
+		return false
+	}
+
+	// if the spec is nil, but the endpoint's spec has ports, then that means
+	// we have some deallocation to do
+	if spec == nil && (endpoint.Spec != nil && len(endpoint.Spec.Ports) > 0) {
+		return false
+	}
+	// that should clear up all of  the nil checks.
+
+	// we're just going to compare equality of the specs. This relies on the
+	// behavior that the service's endpoint will always match the embedded
+	// EndpointSpec
+
+	// if there are different numbers of ports, then obvious this endpoint
+	// isn't fully allocated.
+	if len(endpoint.Spec.Ports) != len(spec.Ports) {
+		return false
+	}
+
+	// check every port in the endpoint's spec against the spec. if there are
+	// any ports in the endpoint that aren't in the spec,  then we know this
+	// isn't fully allocated
+portsLoop:
+	for _, port := range endpoint.Spec.Ports {
+		for _, specPort := range spec.Ports {
+			if portsEqual(port, specPort) {
+				continue portsLoop
+			}
+		}
+		// if we get through every spec port, then we have a mismatch and we're
+		// not fully allocated
+		return false
+	}
+	// finally if we get ALL the way through, and
+	return true
 }

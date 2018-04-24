@@ -1123,4 +1123,87 @@ var _ = Describe("port.Allocator", func() {
 			Expect(err).To(WithTransform(errors.IsErrResourceInUse, BeTrue()))
 		})
 	})
+
+})
+
+var _ = Describe("AlreadyAllocated", func() {
+	Context("endpoint and spec are nil", func() {
+		It("should return true", func() {
+			Expect(AlreadyAllocated(nil, nil)).To(BeTrue())
+		})
+	})
+	Context("endpoint is nil and spec is not", func() {
+		It("should return false", func() {
+			Expect(AlreadyAllocated(nil, &api.EndpointSpec{})).To(BeFalse())
+		})
+	})
+	Context("the endpoint's spec is nil, but the spec is not", func() {
+		It("should return false", func() {
+			Expect(AlreadyAllocated(&api.Endpoint{}, &api.EndpointSpec{})).To(BeFalse())
+		})
+	})
+	Context("spec is nil, and endpoint.Spec is not nil and has more than 0 ports", func() {
+		endpoint := &api.Endpoint{
+			Spec: &api.EndpointSpec{
+				Ports: []*api.PortConfig{
+					{},
+				},
+			},
+		}
+		It("should return false", func() {
+			Expect(AlreadyAllocated(endpoint, nil)).To(BeFalse())
+		})
+	})
+	Context("spec and endpoint have different numbers of ports", func() {
+		endpoint := &api.Endpoint{
+			Spec: &api.EndpointSpec{
+				Ports: []*api.PortConfig{
+					{},
+				},
+			},
+		}
+		spec := &api.EndpointSpec{
+			Ports: []*api.PortConfig{
+				{}, {},
+			},
+		}
+		It("should return false", func() {
+			Expect(AlreadyAllocated(endpoint, spec)).To(BeFalse())
+		})
+	})
+	Context("spec and endpoint ports are the same", func() {
+		endpoint := &api.Endpoint{
+			Spec: &api.EndpointSpec{
+				Ports: []*api.PortConfig{
+					{},
+				},
+			},
+		}
+		spec := &api.EndpointSpec{
+			Ports: []*api.PortConfig{
+				{},
+			},
+		}
+
+		It("should return true", func() {
+			Expect(AlreadyAllocated(endpoint, spec)).To(BeTrue())
+		})
+	})
+	Context("spec and endpoint ports are different", func() {
+		endpoint := &api.Endpoint{
+			Spec: &api.EndpointSpec{
+				Ports: []*api.PortConfig{
+					{},
+				},
+			},
+		}
+		spec := &api.EndpointSpec{
+			Ports: []*api.PortConfig{
+				{PublishedPort: 80},
+			},
+		}
+		It("should return false", func() {
+			Expect(AlreadyAllocated(endpoint, spec)).To(BeFalse())
+		})
+	})
 })
