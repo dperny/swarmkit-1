@@ -1,7 +1,7 @@
 package driver
 
 import (
-	"fmt"
+	"net"
 
 	"github.com/docker/docker/pkg/plugingetter"
 	"github.com/docker/libnetwork/datastore"
@@ -52,8 +52,8 @@ type allocator struct {
 
 // NewAllocator creates and returns a new driver allocator
 func NewAllocator(drvRegistry DrvRegistry) *allocator {
-	return &Allocator{
-		drvRegistry: DrvRegistry,
+	return &allocator{
+		drvRegistry: drvRegistry,
 	}
 }
 
@@ -81,7 +81,7 @@ func (a *allocator) Restore(networks []*api.Network) error {
 			if err != nil {
 				return err
 			}
-			_, err := d.driver.NetworkAllocate(n.ID, options, ipamdata, nil)
+			_, err = driver.NetworkAllocate(n.ID, options, ipamData, nil)
 			if err != nil {
 				// again, this error case should not occur, because we should
 				// not fail when we previously succeeded
@@ -91,6 +91,7 @@ func (a *allocator) Restore(networks []*api.Network) error {
 			}
 		}
 	}
+	return nil
 }
 
 // Allocate takes a network and allocates it with the network driver, filling
