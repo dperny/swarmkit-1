@@ -78,10 +78,11 @@ func NewAllocator(pg plugingetter.PluginGetter) Allocator {
 		panic(fmt.Sprintf("initIPAMDrivers returned an error: %v", err))
 	}
 	return &allocator{
-		reg:    reg,
-		port:   port.NewAllocator(),
-		ipam:   ipam.NewAllocator(reg),
-		driver: driver.NewAllocator(reg),
+		services: map[string]*api.Service{},
+		reg:      reg,
+		port:     port.NewAllocator(),
+		ipam:     ipam.NewAllocator(reg),
+		driver:   driver.NewAllocator(reg),
 	}
 }
 
@@ -106,7 +107,7 @@ servicesLoop:
 		// isn't fully allocated, we still need to pass it to the Restore
 		// methods, because we absolutely must have the entire state, fully
 		// allocated or not, before we can pursue new allocations.
-		if service.Spec.Endpoint != nil {
+		if service.Spec.Endpoint != nil && service.Endpoint.Spec != nil {
 			// if the mode differs, the service isn't fully allocated
 			if service.Endpoint.Spec.Mode != service.Spec.Endpoint.Mode {
 				continue servicesLoop
@@ -174,7 +175,7 @@ func (a *allocator) AllocateNetwork(n *api.Network) error {
 	if err != nil {
 		return err
 	}
-	if local {
+	if !local {
 		// if the network is already allocated and we try to call allocate
 		// again, ipam.AllocateNetwork will return ErrAlreadyAllocated, so we
 		// don't need to check that at this level
@@ -182,10 +183,7 @@ func (a *allocator) AllocateNetwork(n *api.Network) error {
 			return err
 		}
 	}
-	if err := a.driver.Allocate(n); err != nil {
-		return err
-	}
-	return nil
+	return a.driver.Allocate(n)
 }
 
 func (a *allocator) DeallocateNetwork(n *api.Network) error {
@@ -259,8 +257,8 @@ func (a *allocator) AllocateService(service *api.Service) error {
 		}
 	}
 	proposal.Commit()
-	service.Endpoint.Ports = proposal.Ports()
 	service.Endpoint = endpoint
+	service.Endpoint.Ports = proposal.Ports()
 	service.Endpoint.Spec = endpointSpec
 	// save the service endpoint to the endpoints map
 	a.services[service.ID] = service

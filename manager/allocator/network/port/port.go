@@ -227,6 +227,9 @@ func (pa *allocator) Allocate(endpoint *api.Endpoint, spec *api.EndpointSpec) (P
 	// which we own, which means we have the old endpoint spec around and can
 	// compare the user's specs. Then, all we have to do is see if the
 	// published port changed.
+	if spec == nil {
+		spec = &api.EndpointSpec{}
+	}
 
 	// So, basically, here's what we're going to do: we're going to create a
 	// new list of PortConfigs. This will be the final list that gets put into

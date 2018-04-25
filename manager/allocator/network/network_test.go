@@ -5,8 +5,16 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+
+	"github.com/docker/swarmkit/api"
+	"github.com/docker/swarmkit/manager/allocator/ipam"
 )
 
-var _ = Describe("Network", func() {
+type mockIpamAllocator struct{}
 
+func (m *mockIpamAllocator) Restore(_ []*api.Network, _ []*api.Endpoint, _ []*api.NetworkAttachmentSpec) error {
+
+}
+
+var _ = Describe("network.Allocator", func() {
 })
