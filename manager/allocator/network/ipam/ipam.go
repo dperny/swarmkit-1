@@ -548,11 +548,17 @@ newvips:
 		allocate = append(allocate, nwid)
 	}
 
-	// now deallocate the old vips, and allocate the new ones
-	a.deallocateVIPs(deallocate)
-
 	// create a new slice to hold the vips we're allocating now
 	newVips := make([]*api.Endpoint_VirtualIP, 0, len(allocate))
+
+	// set up a deferred function to roll back any allocation that has
+	// succeeded if later allocation fails.
+	defer func() {
+		if rerr != nil {
+			a.deallocateVIPs(newVips)
+		}
+	}()
+
 allocateLoop:
 	for _, nwid := range allocate {
 		// we already verified that every one of the requested networks
@@ -597,6 +603,17 @@ allocateLoop:
 		// and all of them are exhausted
 		return errors.ErrResourceExhausted("ip address", "no IPs remaining for network %v", nwid)
 	}
+
+	// Elsewhere in the code we might deallocate first, and then allocate, that
+	// way if we're approaching resource exhaustion we can reuse some of our
+	// own freed resources. However, because each VIP belongs to a different
+	// network, and each network in turn has non-overlapping subnets, there is
+	// no chance of IPs we're releasing to be reused in the allocation of new
+	// VIPs. So, instead, we deallocate last, so that if any allocation fails,
+	// we only have to roll back incomplete allocation, not re-allocation a
+	// release. We don't have to worry about re-allocating if deallocate fails,
+	// because if deallocation fails we are in a world of hurt.
+	a.deallocateVIPs(deallocate)
 
 	// now we've allocated every new vip. Add them all to our held over VIPs,
 	// and return nil

@@ -1213,6 +1213,12 @@ var _ = Describe("ipam.Allocator", func() {
 						Expect(addressesReleased[addr.String()]).To(Equal(poolID))
 					})
 				})
+				PContext("when allocation fails partway through", func() {
+					It("should return an error", func() {
+					})
+					It("should roll back any successful new allocations", func() {
+					})
+				})
 			})
 		})
 		// TODO(dperny): write these tests.
