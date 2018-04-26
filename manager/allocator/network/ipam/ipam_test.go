@@ -992,6 +992,13 @@ var _ = Describe("ipam.Allocator", func() {
 		})
 	})
 
+	PDescribe("deallocating networks", func() {
+		It("should free the network's IPAM resources", func() {
+		})
+		It("should remove the IPAMConfig from the Network object", func() {
+		})
+	})
+
 	Describe("allocating VIPs and Attachments", func() {
 		var (
 			addressesAllocated int

@@ -466,7 +466,8 @@ func (a *allocator) AllocateNetwork(n *api.Network) (rerr error) {
 }
 
 // DeallocateNetwork takes a network that has been allocated, and releases all
-// of the IPAM resource associated with it.
+// of the IPAM resource associated with it. It then removes the IPAM config
+// from the object, returning with it in an unallocated state.
 func (a *allocator) DeallocateNetwork(network *api.Network) {
 	local, ok := a.networks[network.ID]
 	if !ok {
@@ -484,6 +485,9 @@ func (a *allocator) DeallocateNetwork(network *api.Network) {
 		ipam.ReleaseAddress(local.pools[config.Subnet], net.ParseIP(config.Gateway))
 		ipam.ReleasePool(local.pools[config.Subnet])
 	}
+	// remove the IPAM config. this may be useful for "rolling back" a network
+	// allocation.
+	network.IPAM = nil
 	delete(a.networks, network.ID)
 }
 
