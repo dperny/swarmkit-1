@@ -1435,3 +1435,245 @@ func TestNewNodeAllocator(t *testing.T) {
 		isValidNode(t, node1, node1FromStore, []string{"ingress", "overlayID1"})
 	*/
 }
+
+func TestNewNodeAllocatorDeletingNetworkRace(t *testing.T) {
+	s := store.NewMemoryStore(nil)
+	assert.NotNil(t, s)
+	defer s.Close()
+
+	a := NewNew(s, nil)
+	assert.NotNil(t, a)
+
+	var node1 *api.Node
+	// populate the store with 2 networks and a node
+	assert.NoError(t, s.Update(func(tx store.Tx) error {
+		in := &api.Network{
+			ID: "ingress",
+			Spec: api.NetworkSpec{
+				Annotations: api.Annotations{
+					Name: "ingress",
+				},
+				Ingress: true,
+			},
+		}
+		assert.NoError(t, store.CreateNetwork(tx, in))
+
+		n1 := &api.Network{
+			ID: "overlayID1",
+			Spec: api.NetworkSpec{
+				Annotations: api.Annotations{
+					Name: "overlayID1",
+				},
+			},
+		}
+		assert.NoError(t, store.CreateNetwork(tx, n1))
+
+		n2 := &api.Network{
+			ID: "overlayID2",
+			Spec: api.NetworkSpec{
+				Annotations: api.Annotations{
+					Name: "overlayID2",
+				},
+			},
+		}
+		assert.NoError(t, store.CreateNetwork(tx, n2))
+
+		node1 = &api.Node{
+			ID: "node1",
+		}
+		assert.NoError(t, store.CreateNode(tx, node1))
+
+		return nil
+	}))
+
+	// set up event queues for nodes and networks
+	nodeWatch, nodeCancel := state.Watch(s.WatchQueue(), api.EventUpdateNode{}, api.EventDeleteNode{})
+	defer nodeCancel()
+	netWatch, netCancel := state.Watch(s.WatchQueue(), api.EventUpdateNetwork{}, api.EventDeleteNetwork{})
+	defer netCancel()
+
+	// create a context, get everything set up, and start the allocator
+	// now start the allocator
+	ctx, cancel := context.WithCancel(context.Background())
+	waitStop := make(chan struct{})
+	// runErr is written in the go function, but not read until after waitStop
+	// is close, so this is concurrency-safe
+	var runErr error
+	go func() {
+		runErr = a.Run(ctx)
+		close(waitStop)
+	}()
+
+	// now wait for the networks and nodes to be created
+	// Validate node has 2 LB IP address (1 for each network).
+	watchNetwork(t, netWatch, false, isValidNetwork) // ingress
+	watchNetwork(t, netWatch, false, isValidNetwork) // overlayID1
+	watchNode(t, nodeWatch, false, isValidNode, node1,
+		[]string{"ingress", "overlayID1", "overlayID2"},
+	) // node1
+
+	// now, delete network 1. We expect it to be removed from the node
+	assert.NoError(t, s.Update(func(tx store.Tx) error {
+		return store.DeleteNetwork(tx, "overlayID2")
+	}))
+
+	watchNode(t, nodeWatch, false, isValidNode, node1,
+		[]string{"ingress", "overlayID1"},
+	)
+
+	// now stop the allocator.
+	// cancel the context
+	cancel()
+	// wait for the allocator to full stop
+	<-waitStop
+	// make sure no error has occurred
+	assert.NoError(t, runErr)
+
+	// delete another network while the allocator is stopped, this is the same
+	// situation as in which the network is deleted and an immediate leadership
+	// change prevents reallocation of nodes in the meantime
+	assert.NoError(t, s.Update(func(tx store.Tx) error {
+		return store.DeleteNetwork(tx, "overlayID1")
+	}))
+
+	// then, start up a fresh new allocator
+	a2 := NewNew(s, nil)
+	assert.NotNil(t, a2)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	waitStop2 := make(chan struct{})
+	var runErr2 error
+	go func() {
+		runErr2 = a2.Run(ctx2)
+		close(waitStop2)
+	}()
+
+	// defer stopping this allocator, which runs until the end of the test
+	defer func() {
+		cancel2()
+		<-waitStop2
+		assert.NoError(t, runErr2)
+	}()
+
+	// wait for the node to be updated to remove the network
+	watchNode(t, nodeWatch, false, isValidNode, node1, []string{"ingress"})
+}
+
+func TestNodeAllocatorDeletingNetworkRace(t *testing.T) {
+	t.Skip("this is known to fail on the old allocator")
+	s := store.NewMemoryStore(nil)
+	assert.NotNil(t, s)
+	defer s.Close()
+
+	a, err := New(s, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, a)
+
+	var node1 *api.Node
+	// populate the store with 2 networks and a node
+	assert.NoError(t, s.Update(func(tx store.Tx) error {
+		in := &api.Network{
+			ID: "ingress",
+			Spec: api.NetworkSpec{
+				Annotations: api.Annotations{
+					Name: "ingress",
+				},
+				Ingress: true,
+			},
+		}
+		assert.NoError(t, store.CreateNetwork(tx, in))
+
+		n1 := &api.Network{
+			ID: "overlayID1",
+			Spec: api.NetworkSpec{
+				Annotations: api.Annotations{
+					Name: "overlayID1",
+				},
+			},
+		}
+		assert.NoError(t, store.CreateNetwork(tx, n1))
+
+		n2 := &api.Network{
+			ID: "overlayID2",
+			Spec: api.NetworkSpec{
+				Annotations: api.Annotations{
+					Name: "overlayID2",
+				},
+			},
+		}
+		assert.NoError(t, store.CreateNetwork(tx, n2))
+
+		node1 = &api.Node{
+			ID: "node1",
+		}
+		assert.NoError(t, store.CreateNode(tx, node1))
+
+		return nil
+	}))
+
+	// set up event queues for nodes and networks
+	nodeWatch, nodeCancel := state.Watch(s.WatchQueue(), api.EventUpdateNode{}, api.EventDeleteNode{})
+	defer nodeCancel()
+	netWatch, netCancel := state.Watch(s.WatchQueue(), api.EventUpdateNetwork{}, api.EventDeleteNetwork{})
+	defer netCancel()
+
+	waitStop := make(chan struct{})
+	// runErr is written in the go function, but not read until after waitStop
+	// is close, so this is concurrency-safe
+	var runErr error
+	go func() {
+		runErr = a.Run(context.Background())
+		close(waitStop)
+	}()
+
+	// now wait for the networks and nodes to be created
+	// Validate node has 2 LB IP address (1 for each network).
+	watchNetwork(t, netWatch, false, isValidNetwork) // ingress
+	watchNetwork(t, netWatch, false, isValidNetwork) // overlayID1
+	watchNode(t, nodeWatch, false, isValidNode, node1,
+		[]string{"ingress", "overlayID1", "overlayID2"},
+	) // node1
+
+	// now, delete network 1. We expect it to be removed from the node
+	assert.NoError(t, s.Update(func(tx store.Tx) error {
+		return store.DeleteNetwork(tx, "overlayID2")
+	}))
+
+	watchNode(t, nodeWatch, false, isValidNode, node1,
+		[]string{"ingress", "overlayID1"},
+	)
+
+	a.Stop()
+	// wait for the allocator to full stop
+	<-waitStop
+	assert.NoError(t, runErr)
+
+	// delete another network while the allocator is stopped, this is the same
+	// situation as in which the network is deleted and an immediate leadership
+	// change prevents reallocation of nodes in the meantime
+	assert.NoError(t, s.Update(func(tx store.Tx) error {
+		return store.DeleteNetwork(tx, "overlayID1")
+	}))
+
+	// then, start up a fresh new allocator
+	a2, err := New(s, nil)
+	assert.NotNil(t, a2)
+	assert.NoError(t, err)
+
+	waitStop2 := make(chan struct{})
+	var runErr2 error
+	go func() {
+		runErr2 = a2.Run(context.Background())
+		close(waitStop2)
+	}()
+
+	// defer stopping this allocator, which runs until the end of the test
+	defer func() {
+		a2.Stop()
+		<-waitStop2
+		assert.NoError(t, runErr2)
+	}()
+
+	// wait for the node to be updated to remove the network
+	watchNode(t, nodeWatch, false, isValidNode, node1, []string{"ingress"})
+}

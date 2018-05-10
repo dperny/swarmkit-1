@@ -485,6 +485,9 @@ func (a *allocator) DeallocateNetwork(network *api.Network) {
 	// allocated, and we can use it without nil checking
 	ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
 
+	// TODO(dperny): if the network has outstanding dependencies, deallocating
+	// will cause us to enter a bad state.
+
 	for _, config := range local.nw.IPAM.Configs {
 		// these things can return errors, but we literally can't do anything
 		// about it if they do, so just ignore it.
@@ -755,7 +758,12 @@ addressesLoop:
 // node
 func (a *allocator) DeallocateAttachment(attachment *api.NetworkAttachment) error {
 	// get the local network and IPAM driver
-	local := a.networks[attachment.Network.ID]
+	local, ok := a.networks[attachment.Network.ID]
+	// the only case where we actually try to deallocate an attachment for
+	// which the network is not allocated should be node attachments.
+	if !ok {
+		return errors.ErrDependencyNotAllocated("network", attachment.Network.ID)
+	}
 	ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
 
 	// if we get an error, we are going to continue through the function, but

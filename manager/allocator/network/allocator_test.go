@@ -126,202 +126,237 @@ var _ = Describe("network.Allocator", func() {
 				Expect(a.nodeLocalNetworks["localnet"]).To(Equal(initNetworks[1]))
 			})
 		})
-		Context("when there are some services allocated", func() {
+		Context("when objects that depend on networks are allocated", func() {
 			BeforeEach(func() {
-				// service that are initialized
-				initServices = []*api.Service{
-					// an empty service, should not be included in restore, but
-					// should be included in our services tracking map
-					{ID: "service0"},
-					// a fully allocated service, should be included in the
-					// restore, and should be tracked in the "allocated" map
-					{
-						ID:          "service1",
-						SpecVersion: &api.Version{Index: 1},
-						Endpoint: &api.Endpoint{
-							Spec: &api.EndpointSpec{
-								Mode: api.ResolutionModeVirtualIP,
-							},
-							VirtualIPs: []*api.Endpoint_VirtualIP{
-								{NetworkID: "nw1", Addr: "192.168.1.1/24"},
-								{NetworkID: "nw2", Addr: "192.168.2.1/24"},
-							},
+				initNetworks = append(initNetworks,
+					&api.Network{
+						ID: "nw1",
+					},
+					&api.Network{
+						ID: "nw2",
+					},
+					&api.Network{
+						ID: "nw3",
+					},
+					&api.Network{
+						ID: "nw4",
+					},
+					&api.Network{
+						ID: "localnet",
+						DriverState: &api.Driver{
+							Name: "local",
 						},
-						Spec: api.ServiceSpec{
-							Endpoint: &api.EndpointSpec{
-								Mode: api.ResolutionModeVirtualIP,
+					},
+				)
+				for _, nw := range initNetworks {
+					// use the driver name "local" to indicate node-local networks
+					if nw.DriverState != nil && nw.DriverState.Name == "local" {
+						mockDriver.EXPECT().IsNetworkNodeLocal(nw).Return(true, nil)
+					} else {
+						mockDriver.EXPECT().IsNetworkNodeLocal(nw).Return(false, nil)
+					}
+				}
+				mockDriver.EXPECT().Restore(initNetworks)
+			})
+			Context("when there are some services allocated", func() {
+				BeforeEach(func() {
+					// service that are initialized
+					initServices = []*api.Service{
+						// an empty service, should not be included in restore, but
+						// should be included in our services tracking map
+						{ID: "service0"},
+						// a fully allocated service, should be included in the
+						// restore, and should be tracked in the "allocated" map
+						{
+							ID:          "service1",
+							SpecVersion: &api.Version{Index: 1},
+							Endpoint: &api.Endpoint{
+								Spec: &api.EndpointSpec{
+									Mode: api.ResolutionModeVirtualIP,
+								},
+								VirtualIPs: []*api.Endpoint_VirtualIP{
+									{NetworkID: "nw1", Addr: "192.168.1.1/24"},
+									{NetworkID: "nw2", Addr: "192.168.2.1/24"},
+								},
 							},
-							Task: api.TaskSpec{
-								Networks: []*api.NetworkAttachmentConfig{
-									{Target: "nw1"},
-									{Target: "nw2"},
+							Spec: api.ServiceSpec{
+								Endpoint: &api.EndpointSpec{
+									Mode: api.ResolutionModeVirtualIP,
+								},
+								Task: api.TaskSpec{
+									Networks: []*api.NetworkAttachmentConfig{
+										{Target: "nw1"},
+										{Target: "nw2"},
+									},
 								},
 							},
 						},
-					},
-					// Partially allocated service, should be included in the
-					// IPAM and Port restore, but should not
-					{
-						ID:          "service2",
-						SpecVersion: &api.Version{Index: 2},
-						Endpoint: &api.Endpoint{
-							Spec: &api.EndpointSpec{
-								Mode: api.ResolutionModeVirtualIP,
+						// Partially allocated service, should be included in the
+						// IPAM and Port restore, but should not
+						{
+							ID:          "service2",
+							SpecVersion: &api.Version{Index: 2},
+							Endpoint: &api.Endpoint{
+								Spec: &api.EndpointSpec{
+									Mode: api.ResolutionModeVirtualIP,
+								},
+								VirtualIPs: []*api.Endpoint_VirtualIP{
+									{NetworkID: "nw1", Addr: "192.168.1.1/24"},
+								},
 							},
-							VirtualIPs: []*api.Endpoint_VirtualIP{
-								{NetworkID: "nw1", Addr: "192.168.1.1/24"},
+							Spec: api.ServiceSpec{
+								Endpoint: &api.EndpointSpec{},
 							},
 						},
-						Spec: api.ServiceSpec{
-							Endpoint: &api.EndpointSpec{},
-						},
-					},
-				}
+					}
 
-				endpoints := []*api.Endpoint{initServices[1].Endpoint, initServices[2].Endpoint}
-				mockPort.EXPECT().Restore(endpoints)
-				mockIpam.EXPECT().Restore(nil, endpoints, []*api.NetworkAttachment{})
-				mockDriver.EXPECT().Restore(nil)
-			})
+					endpoints := []*api.Endpoint{initServices[1].Endpoint, initServices[2].Endpoint}
+					mockPort.EXPECT().Restore(endpoints)
+					mockIpam.EXPECT().Restore(initNetworks, endpoints, []*api.NetworkAttachment{})
+				})
 
-			It("should not return an error", func() {
-				Expect(err).ToNot(HaveOccurred())
+				It("should not return an error", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should restore ipam and port state of the service's endpoints", func() {
+					// again, an empty spec, because this behavior is covered by
+					// gomock doing its thing.
+				})
+				It("should mark service 0 & 1 as fully allocated, and not service 2", func() {
+					Expect(a.services).To(And(
+						HaveKey("service0"),
+						HaveKey("service1"),
+						Not(HaveKey("service2")),
+					))
+					Expect(a.services["service0"]).To(Equal(initServices[0]))
+					Expect(a.services["service1"]).To(Equal(initServices[1]))
+				})
 			})
-			It("should restore ipam and port state of the service's endpoints", func() {
-				// again, an empty spec, because this behavior is covered by
-				// gomock doing its thing.
-			})
-			It("should mark service 0 & 1 as fully allocated, and not service 2", func() {
-				Expect(a.services).To(And(
-					HaveKey("service0"),
-					HaveKey("service1"),
-					Not(HaveKey("service2")),
-				))
-				Expect(a.services["service0"]).To(Equal(initServices[0]))
-				Expect(a.services["service1"]).To(Equal(initServices[1]))
-			})
-		})
-		Context("when some tasks are allocated", func() {
-			BeforeEach(func() {
-				initTasks = []*api.Task{
-					// Empty task, should add any attachments
-					{},
-					{
-						Networks: []*api.NetworkAttachment{
-							{Network: &api.Network{ID: "foo"}, Addresses: []string{"192.168.1.4/24"}},
-							{Network: &api.Network{ID: "bar"}, Addresses: []string{"192.168.2.4/24"}},
+			Context("when some tasks are allocated", func() {
+				BeforeEach(func() {
+					initTasks = []*api.Task{
+						// Empty task, should add any attachments
+						{},
+						{
+							Networks: []*api.NetworkAttachment{
+								{Network: &api.Network{ID: "foo"}, Addresses: []string{"192.168.1.4/24"}},
+								{Network: &api.Network{ID: "bar"}, Addresses: []string{"192.168.2.4/24"}},
+							},
 						},
-					},
-					{
-						Networks: []*api.NetworkAttachment{
-							{Network: &api.Network{ID: "baz"}, Addresses: []string{"192.168.3.4/24"}},
-							{Network: &api.Network{ID: "bat"}, Addresses: []string{"192.168.4.4/24"}},
+						{
+							Networks: []*api.NetworkAttachment{
+								{Network: &api.Network{ID: "baz"}, Addresses: []string{"192.168.3.4/24"}},
+								{Network: &api.Network{ID: "bat"}, Addresses: []string{"192.168.4.4/24"}},
+							},
 						},
-					},
-					{
-						Networks: []*api.NetworkAttachment{
-							{Network: &api.Network{ID: "local"}, Addresses: []string{"10.6.6.6"}},
+						{
+							Networks: []*api.NetworkAttachment{
+								{
+									Network: &api.Network{
+										ID: "localnet",
+										DriverState: &api.Driver{
+											Name: "local",
+										},
+									},
+									Addresses: []string{"10.6.6.6"}},
+							},
 						},
-					},
-				}
+					}
 
-				// add the "local" network, which will be node-local
-				local := &api.Network{
-					ID: "local",
-				}
-				initNetworks = append(initNetworks, local)
-				mockDriver.EXPECT().IsNetworkNodeLocal(local).Return(true, nil)
-
-				attachments := append(initTasks[1].Copy().Networks, initTasks[2].Copy().Networks...)
-				mockPort.EXPECT().Restore([]*api.Endpoint{})
-				mockIpam.EXPECT().Restore(initNetworks, []*api.Endpoint{}, attachments).Return(nil)
-				mockDriver.EXPECT().Restore(initNetworks).Return(nil)
+					attachments := append(initTasks[1].Copy().Networks, initTasks[2].Copy().Networks...)
+					mockPort.EXPECT().Restore([]*api.Endpoint{})
+					mockIpam.EXPECT().Restore(initNetworks, []*api.Endpoint{}, attachments).Return(nil)
+				})
+				It("should not return an error", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should restore the tasks", func() {
+					// another empty spec, because gomock handles this
+				})
 			})
-			It("should not return an error", func() {
-				Expect(err).ToNot(HaveOccurred())
+			Context("when some nodes are allocated", func() {
+				BeforeEach(func() {
+					initNodes = []*api.Node{
+						{},
+						{
+							Attachments: []*api.NetworkAttachment{
+								{Network: &api.Network{ID: "nw1"}, Addresses: []string{"192.168.1.4/24"}},
+								{Network: &api.Network{ID: "nw2"}, Addresses: []string{"192.168.2.4/24"}},
+								// the gone network is one that has been
+								// deallocated
+								{Network: &api.Network{ID: "gone"}, Addresses: []string{"192.168.5.3/24"}},
+							},
+						},
+						{
+							Attachments: []*api.NetworkAttachment{
+								{Network: &api.Network{ID: "nw3"}, Addresses: []string{"192.168.3.4/24"}},
+								{Network: &api.Network{ID: "nw4"}, Addresses: []string{"192.168.4.4/24"}},
+								{Network: &api.Network{ID: "gone"}, Addresses: []string{"192.168.5.4/24"}},
+							},
+						},
+					}
+					// only the first two attachments on each node should be
+					// restored
+					attachments := append(initNodes[1].Copy().Attachments[:2], initNodes[2].Copy().Attachments[:2]...)
+					mockPort.EXPECT().Restore([]*api.Endpoint{})
+					mockIpam.EXPECT().Restore(initNetworks, []*api.Endpoint{}, attachments).Return(nil)
+				})
+				It("should not return an error", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
+				It("should restore all of the attachments", func() {
+					// empty case, handled by gomock
+				})
 			})
-			It("should restore the tasks", func() {
-				// another empty spec, because gomock handles this
-			})
-		})
-		Context("when some nodes are allocated", func() {
-			BeforeEach(func() {
-				initNodes = []*api.Node{
-					{},
-					{
-						Attachments: []*api.NetworkAttachment{
-							{Network: &api.Network{ID: "nw1"}, Addresses: []string{"192.168.1.4/24"}},
-							{Network: &api.Network{ID: "nw2"}, Addresses: []string{"192.168.2.4/24"}},
+			Context("when some tasks and some nodes are allocated", func() {
+				BeforeEach(func() {
+					initNodes = []*api.Node{
+						{},
+						{
+							Attachments: []*api.NetworkAttachment{
+								{Network: &api.Network{ID: "nw1"}, Addresses: []string{"192.168.1.4/24"}},
+								{Network: &api.Network{ID: "nw2"}, Addresses: []string{"192.168.2.4/24"}},
+							},
 						},
-					},
-					{
-						Attachments: []*api.NetworkAttachment{
-							{Network: &api.Network{ID: "nw3"}, Addresses: []string{"192.168.3.4/24"}},
-							{Network: &api.Network{ID: "nw4"}, Addresses: []string{"192.168.4.4/24"}},
+						{
+							Attachments: []*api.NetworkAttachment{
+								{Network: &api.Network{ID: "nw3"}, Addresses: []string{"192.168.3.4/24"}},
+								{Network: &api.Network{ID: "nw4"}, Addresses: []string{"192.168.4.4/24"}},
+							},
 						},
-					},
-				}
-				attachments := append(initNodes[1].Copy().Attachments, initNodes[2].Copy().Attachments...)
-				mockPort.EXPECT().Restore([]*api.Endpoint{})
-				mockIpam.EXPECT().Restore(nil, []*api.Endpoint{}, attachments).Return(nil)
-				mockDriver.EXPECT().Restore(nil).Return(nil)
-			})
-			It("should not return an error", func() {
-				Expect(err).ToNot(HaveOccurred())
-			})
-			It("should restore all of the attachments", func() {
-				// empty case, handled by gomock
-			})
-		})
-		Context("when some tasks and some nodes are allocated", func() {
-			BeforeEach(func() {
-				initNodes = []*api.Node{
-					{},
-					{
-						Attachments: []*api.NetworkAttachment{
-							{Network: &api.Network{ID: "nw1"}, Addresses: []string{"192.168.1.4/24"}},
-							{Network: &api.Network{ID: "nw2"}, Addresses: []string{"192.168.2.4/24"}},
+					}
+					initTasks = []*api.Task{
+						// Empty task, should add any attachments
+						{},
+						{
+							Networks: []*api.NetworkAttachment{
+								{Network: &api.Network{}, Addresses: []string{"192.168.1.4/24"}},
+								{Network: &api.Network{}, Addresses: []string{"192.168.2.4/24"}},
+							},
 						},
-					},
-					{
-						Attachments: []*api.NetworkAttachment{
-							{Network: &api.Network{ID: "nw3"}, Addresses: []string{"192.168.3.4/24"}},
-							{Network: &api.Network{ID: "nw4"}, Addresses: []string{"192.168.4.4/24"}},
+						{
+							Networks: []*api.NetworkAttachment{
+								{Network: &api.Network{}, Addresses: []string{"192.168.3.4/24"}},
+								{Network: &api.Network{}, Addresses: []string{"192.168.4.4/24"}},
+							},
 						},
-					},
-				}
-				initTasks = []*api.Task{
-					// Empty task, should add any attachments
-					{},
-					{
-						Networks: []*api.NetworkAttachment{
-							{Network: &api.Network{}, Addresses: []string{"192.168.1.4/24"}},
-							{Network: &api.Network{}, Addresses: []string{"192.168.2.4/24"}},
-						},
-					},
-					{
-						Networks: []*api.NetworkAttachment{
-							{Network: &api.Network{}, Addresses: []string{"192.168.3.4/24"}},
-							{Network: &api.Network{}, Addresses: []string{"192.168.4.4/24"}},
-						},
-					},
-				}
-				attachments := append(initTasks[1].Copy().Networks,
-					append(initTasks[2].Copy().Networks,
-						append(initNodes[1].Copy().Attachments,
-							initNodes[2].Copy().Attachments...,
+					}
+					attachments := append(initTasks[1].Copy().Networks,
+						append(initTasks[2].Copy().Networks,
+							append(initNodes[1].Copy().Attachments,
+								initNodes[2].Copy().Attachments...,
+							)...,
 						)...,
-					)...,
-				)
-				mockPort.EXPECT().Restore([]*api.Endpoint{})
-				mockIpam.EXPECT().Restore(nil, []*api.Endpoint{}, attachments).Return(nil)
-				mockDriver.EXPECT().Restore(nil).Return(nil)
-			})
-			It("should restore all of the attachments", func() {
-				// handled by gomock
-			})
-			It("should return no error", func() {
-				Expect(err).ToNot(HaveOccurred())
+					)
+					mockPort.EXPECT().Restore([]*api.Endpoint{})
+					mockIpam.EXPECT().Restore(initNetworks, []*api.Endpoint{}, attachments).Return(nil)
+				})
+				It("should restore all of the attachments", func() {
+					// handled by gomock
+				})
+				It("should return no error", func() {
+					Expect(err).ToNot(HaveOccurred())
+				})
 			})
 		})
 		Context("when errors occur", func() {
@@ -1302,6 +1337,47 @@ var _ = Describe("network.Allocator", func() {
 						&api.NetworkAttachment{
 							Network:              nw1,
 							DriverAttachmentOpts: map[string]string{"foo": "bar"},
+						},
+					))
+				})
+			})
+			Context("when a node includes networks that aren't allocated", func() {
+				BeforeEach(func() {
+					node.Attachments = []*api.NetworkAttachment{
+						{
+							Network:              nw1,
+							DriverAttachmentOpts: map[string]string{"foo": "bar"},
+						},
+						{
+							Network:              ingress,
+							DriverAttachmentOpts: map[string]string{"baz": "bat"},
+						},
+						{
+							Network: &api.Network{
+								ID: "neverexisted",
+							},
+						},
+					}
+					// don't include nw2 in our allocation
+					delete(networks, nw2.ID)
+
+					mockIpam.EXPECT().DeallocateAttachment(
+						node.Attachments[2],
+					).Return(errors.ErrDependencyNotAllocated("network", "neverexisted"))
+				})
+
+				It("should not return an error", func() {
+					Expect(err).NotTo(HaveOccurred())
+				})
+				It("should remove the allocation", func() {
+					Expect(node.Attachments).To(ConsistOf(
+						&api.NetworkAttachment{
+							Network:              nw1,
+							DriverAttachmentOpts: map[string]string{"foo": "bar"},
+						},
+						&api.NetworkAttachment{
+							Network:              ingress,
+							DriverAttachmentOpts: map[string]string{"baz": "bat"},
 						},
 					))
 				})

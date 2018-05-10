@@ -118,10 +118,41 @@ func NewAllocator(pg plugingetter.PluginGetter) Allocator {
 // If an error occurs during the restore, the local state may be inconsistent,
 // and this allocator should be abandoned
 func (a *allocator) Restore(networks []*api.Network, services []*api.Service, tasks []*api.Task, nodes []*api.Node) error {
+	// there is a problem with restoring nodes: because node deallocation
+	// depends on network deallocation, it is possible for a network to be
+	// deallocated but the corresponding deallocation of nodes to not occur.
+	// this can lead to a situation on restore where a node has attachments
+	// belonging to no network.
+	//
+	// the simple fix, first off, is to ignore attempts to deallocate an
+	// attachment which has no corresponding network. this allows the caller to
+	// get correct allocator and node state by simply reallocating all nodes
+	// after restoring network state.
+	//
+	// however, Restore will return errors if it attempts to restore an
+	// attachment for which the network is not allocated; specifically,
+	// ipam's Restore will return ErrBadState and no restore any subsequent
+	// (correct) allocations.
+	//
+	// to avoid this case, we'll keep a set of all network IDs that we've
+	// encountered so far. then, when we compile our slice of attachments to
+	// restore, we'll skip any node attachments belonging to a network not in
+	// this list
+	//
+	// because networks cannot be updated, we can be sure that any node
+	// attachment that exists either belongs to a fully allocated network, or
+	// belongs to a deleted network, so we can put even unallocated networks in
+	// this map.
+	//
+	// This issue does not exist with task attachments, because a network
+	// cannot be deleted while it is still in use by tasks.
+	existingNetworks := make(map[string]struct{}, len(networks))
+
 	// find if we have an ingress network in this list. if so, save its ID. we
 	// need it to correctly allocate tasks and services. there should only ever
 	// be 1 ingress network
 	for _, nw := range networks {
+		existingNetworks[nw.ID] = struct{}{}
 		// ingress networks should have the ingress field set on the spec
 		if nw.Spec.Ingress {
 			// TODO(dperny): handle partially allocated ingress networks
@@ -180,10 +211,15 @@ func (a *allocator) Restore(networks []*api.Network, services []*api.Service, ta
 			}
 		}
 	}
+
 	for _, node := range nodes {
 		// there will be no node-local networks in a node's attachments
 		for _, attachment := range node.Attachments {
-			attachments = append(attachments, attachment)
+			// if we haven't seen this network while restoring networks, then
+			// skip restoring this attachment; it must be deallocated
+			if _, ok := existingNetworks[attachment.Network.ID]; ok {
+				attachments = append(attachments, attachment)
+			}
 		}
 	}
 
@@ -614,7 +650,13 @@ func (a *allocator) DeallocateNode(node *api.Node) error {
 	var finalErr error
 	for _, attachment := range node.Attachments {
 		if err := a.ipam.DeallocateAttachment(attachment); err != nil {
-			finalErr = err
+			// if the error is ErrDependencyNotAllocated, then that means the
+			// network has already been deallocated. no actually meaningful
+			// error has occurred, and nothing needs to be done. otherwise, we
+			// will return the last error we received.
+			if !errors.IsErrDependencyNotAllocated(err) {
+				finalErr = err
+			}
 		}
 	}
 	return finalErr
