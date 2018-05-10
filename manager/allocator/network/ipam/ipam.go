@@ -574,7 +574,9 @@ allocateLoop:
 		// existed, so again, no need to check ok
 		local := a.networks[nwid]
 		// we don't need to nil check any of the intermediate fields. we made
-		// them we we know they're filled in
+		// them we we know they're filled in. likewise, we don't need to check
+		// that the ipam exists; if it existed when we allocated or restored
+		// the network, it should exist now.
 		ipam, _ := a.drvRegistry.IPAM(local.nw.IPAM.Driver.Name)
 		opts := local.nw.IPAM.Driver.Options
 		// the network may have several pools of IP addresses, and some of them

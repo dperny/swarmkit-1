@@ -176,7 +176,22 @@ var _ = Describe("ipam.Allocator", func() {
 	})
 
 	JustBeforeEach(func() {
+		// capture the old ipams we're swapping out
+		previousDefaultIpam := reg.ipams[ipamapi.DefaultIPAM]
+		previousSwappableIpam := reg.ipams[swappableIPAM]
+
+		// swap out the default mock IPAM for the restorer mock IPAM for
+		// just long enough to restore all of this
+		reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{restorer, nil}
+		// the "swappable" ipam has the same behavior as default unless
+		// we change it.
+		reg.ipams[swappableIPAM] = ipamAndCaps{restorer, nil}
+
 		restoreErr = a.Restore(initNetworks, initEndpoints, initAttachments)
+
+		// store back the previous values of these ipams
+		reg.ipams[ipamapi.DefaultIPAM] = previousDefaultIpam
+		reg.ipams[swappableIPAM] = previousSwappableIpam
 	})
 
 	Describe("Restoring pre-existing allocations", func() {
@@ -959,8 +974,6 @@ var _ = Describe("ipam.Allocator", func() {
 	PDescribe("deallocating networks", func() {
 		It("should free the network's IPAM resources", func() {
 		})
-		It("should remove the IPAMConfig from the Network object", func() {
-		})
 	})
 
 	Describe("allocating VIPs and Attachments", func() {
@@ -982,8 +995,8 @@ var _ = Describe("ipam.Allocator", func() {
 			// does, so we'll set it all up here. We can call Restore any
 			// number of times, so it doesn't matter if a later test calls
 			// Restore again
-			networks := []*api.Network{
-				{
+			initNetworks = append(initNetworks,
+				&api.Network{
 					ID: "nw1",
 					IPAM: &api.IPAMOptions{
 						Driver: &api.Driver{
@@ -1003,7 +1016,7 @@ var _ = Describe("ipam.Allocator", func() {
 						},
 					},
 				},
-				{
+				&api.Network{
 					ID: "nw2",
 					IPAM: &api.IPAMOptions{
 						Driver: &api.Driver{
@@ -1019,7 +1032,7 @@ var _ = Describe("ipam.Allocator", func() {
 						},
 					},
 				},
-			}
+			)
 			// make a mock IPAM driver that can allocate new addresses.
 			mockDefaultIpam = &mockIpam{
 				requestAddressFunc: func(id string, addr net.IP, _ map[string]string) (*net.IPNet, map[string]string, error) {
@@ -1044,25 +1057,25 @@ var _ = Describe("ipam.Allocator", func() {
 					return nil
 				},
 			}
-
-			// swap out the default mock IPAM for the restorer mock IPAM for
-			// just long enough to restore all of this
-			reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{restorer, nil}
-			// the "swappable" ipam has the same behavior as default unless
-			// we change it.
-			reg.ipams[swappableIPAM] = ipamAndCaps{restorer, nil}
-			defer func() {
-				reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{mockDefaultIpam, nil}
-				reg.ipams[swappableIPAM] = ipamAndCaps{mockDefaultIpam, nil}
-			}()
-			a.Restore(networks, nil, nil)
+			reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{mockDefaultIpam, nil}
+			reg.ipams[swappableIPAM] = ipamAndCaps{mockDefaultIpam, nil}
 		})
 		Describe("allocating vips", func() {
+			var (
+				endpoint *api.Endpoint
+				networks map[string]struct{}
+				err      error
+			)
+			BeforeEach(func() {
+				endpoint = &api.Endpoint{}
+				networks = map[string]struct{}{}
+			})
+			JustBeforeEach(func() {
+				err = a.AllocateVIPs(endpoint, networks)
+			})
 			Context("when a requested network is not yet allocated", func() {
-				var err error
 				BeforeEach(func() {
-					e := &api.Endpoint{}
-					err = a.AllocateVIPs(e, map[string]struct{}{"notreal": {}})
+					networks = map[string]struct{}{"notreal": {}}
 				})
 				It("should fail with ErrDependencyNotAllocated", func() {
 					Expect(err).To(HaveOccurred())
@@ -1071,13 +1084,8 @@ var _ = Describe("ipam.Allocator", func() {
 				})
 			})
 			Context("to a new endpoint", func() {
-				var (
-					endpoint *api.Endpoint
-					err      error
-				)
 				BeforeEach(func() {
-					endpoint = &api.Endpoint{}
-					err = a.AllocateVIPs(endpoint, map[string]struct{}{"nw1": {}, "nw2": {}})
+					networks = map[string]struct{}{"nw1": {}, "nw2": {}}
 				})
 				It("should succeed", func() {
 					Expect(err).ToNot(HaveOccurred())
@@ -1099,9 +1107,6 @@ var _ = Describe("ipam.Allocator", func() {
 				})
 			})
 			Context("when updating the attached networks", func() {
-				var (
-					endpoint *api.Endpoint
-				)
 				BeforeEach(func() {
 					endpoint = &api.Endpoint{
 						VirtualIPs: []*api.Endpoint_VirtualIP{
@@ -1111,20 +1116,11 @@ var _ = Describe("ipam.Allocator", func() {
 							},
 						},
 					}
-					// swap out the restorer ipam for a second
-					def := reg.ipams[ipamapi.DefaultIPAM]
-					reg.ipams[ipamapi.DefaultIPAM] = ipamAndCaps{restorer, nil}
-					defer func() {
-						reg.ipams[ipamapi.DefaultIPAM] = def
-					}()
-					a.Restore(nil, []*api.Endpoint{endpoint}, nil)
+					initEndpoints = append(initEndpoints, endpoint)
 				})
 				Context("to add more networks", func() {
-					var (
-						err error
-					)
 					BeforeEach(func() {
-						err = a.AllocateVIPs(endpoint, map[string]struct{}{"nw1": {}, "nw2": {}})
+						networks = map[string]struct{}{"nw1": {}, "nw2": {}}
 					})
 					It("should succeed", func() {
 						Expect(err).ToNot(HaveOccurred())
@@ -1140,12 +1136,6 @@ var _ = Describe("ipam.Allocator", func() {
 					})
 				})
 				Context("to remove a network", func() {
-					var (
-						err error
-					)
-					BeforeEach(func() {
-						err = a.AllocateVIPs(endpoint, map[string]struct{}{})
-					})
 					It("should succeed", func() {
 						Expect(err).ToNot(HaveOccurred())
 					})
@@ -1164,11 +1154,8 @@ var _ = Describe("ipam.Allocator", func() {
 					})
 				})
 				Context("to both add and remove a network", func() {
-					var (
-						err error
-					)
 					BeforeEach(func() {
-						err = a.AllocateVIPs(endpoint, map[string]struct{}{"nw2": {}})
+						networks = map[string]struct{}{"nw2": {}}
 					})
 					It("should succeed", func() {
 						Expect(err).ToNot(HaveOccurred())

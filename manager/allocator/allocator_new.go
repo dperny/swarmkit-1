@@ -287,6 +287,7 @@ func (a *NewAllocator) run(ctx context.Context) error {
 						// when a network is deallocated, if it's an overlay
 						// network, before we can deallocate it we have to
 						// deallocate all of the attachments for its nodes.
+						// this is kind of a sticky situation.
 						if ev.Network.DriverState != nil && ev.Network.DriverState.Name == "overlay" {
 							// TODO(dperny): doing a store update in this event
 							// loop is probably pretty much the worst thing I
