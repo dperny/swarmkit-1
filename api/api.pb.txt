@@ -3498,6 +3498,34 @@ file {
     }
   }
   message_type {
+    name: "DefaultNetworkConfig"
+    field {
+      name: "default_address_pool"
+      number: 1
+      label: LABEL_REPEATED
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.DefaultNetworkConfig.AddressPool"
+      json_name: "defaultAddressPool"
+    }
+    nested_type {
+      name: "AddressPool"
+      field {
+        name: "base"
+        number: 1
+        label: LABEL_OPTIONAL
+        type: TYPE_STRING
+        json_name: "base"
+      }
+      field {
+        name: "pool_size"
+        number: 2
+        label: LABEL_OPTIONAL
+        type: TYPE_UINT32
+        json_name: "poolSize"
+      }
+    }
+  }
+  message_type {
     name: "SpreadOver"
     field {
       name: "spread_descriptor"
@@ -5144,6 +5172,17 @@ file {
         65001: 0
       }
       json_name: "encryptionConfig"
+    }
+    field {
+      name: "default_network_config"
+      number: 9
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".docker.swarmkit.v1.DefaultNetworkConfig"
+      options {
+        65001: 0
+      }
+      json_name: "defaultNetworkConfig"
     }
   }
   message_type {

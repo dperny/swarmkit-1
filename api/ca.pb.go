@@ -197,6 +197,7 @@
 		DispatcherConfig
 		RaftConfig
 		EncryptionConfig
+		DefaultNetworkConfig
 		SpreadOver
 		PlacementPreference
 		Placement

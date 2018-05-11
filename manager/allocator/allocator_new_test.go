@@ -1,7 +1,9 @@
 package allocator
 
 import (
+	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 
 	// import ipamapi for the default driver name
 	"github.com/docker/libnetwork/ipamapi"
+	"github.com/docker/libnetwork/ipams/builtin"
 
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/manager/state"
@@ -1676,4 +1679,97 @@ func TestNodeAllocatorDeletingNetworkRace(t *testing.T) {
 
 	// wait for the node to be updated to remove the network
 	watchNode(t, nodeWatch, false, isValidNode, node1, []string{"ingress"})
+}
+
+func TestNewAllocatorSetDefaultPools(t *testing.T) {
+	s := store.NewMemoryStore(nil)
+	assert.NotNil(t, s)
+	defer s.Close()
+
+	assert.NoError(t, s.Update(func(tx store.Tx) error {
+		// create a cluster with our default address space
+		if err := store.CreateCluster(tx, &api.Cluster{
+			Spec: api.ClusterSpec{
+				DefaultNetworkConfig: api.DefaultNetworkConfig{
+					DefaultAddressPool: []*api.DefaultNetworkConfig_AddressPool{
+						{
+							Base:     "99.99.0.0/16",
+							PoolSize: 24,
+						},
+					},
+				},
+			},
+		}); err != nil {
+			return err
+		}
+
+		if err := store.CreateNetwork(tx, &api.Network{
+			ID: "nw1",
+			Spec: api.NetworkSpec{
+				IPAM: &api.IPAMOptions{
+					Driver: &api.Driver{
+						Name: ipamapi.DefaultIPAM,
+					},
+				},
+			},
+		}); err != nil {
+			return err
+		}
+
+		return nil
+	}))
+
+	// set up an even queue for network events
+	netWatch, netCancel := state.Watch(s.WatchQueue(), api.EventUpdateNetwork{}, api.EventDeleteNetwork{})
+	defer netCancel()
+
+	a := NewNew(s, nil)
+	assert.NotNil(t, a)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waitStop := make(chan struct{})
+
+	// err is written before waitStop is closed, and read after, making it
+	// concurrency safe
+	var runErr error
+	go func() {
+		runErr = a.Run(ctx)
+		close(waitStop)
+	}()
+	defer func() {
+		cancel()
+		<-waitStop
+		assert.NoError(t, runErr)
+	}()
+
+	watchNetwork(t, netWatch, false, isValidNetwork) // overlayID1
+	pool := builtin.GetDefaultIPAddressPool()
+	if assert.Len(t, pool, 1) {
+		assert.Equal(t, "99.99.0.0/16", pool[0].Base)
+		assert.Equal(t, 24, pool[0].Size)
+	}
+	var nw *api.Network
+	s.View(func(tx store.ReadTx) {
+		nw = store.GetNetwork(tx, "nw1")
+	})
+	assert.NotNil(t, nw)
+	assert.NotNil(t, nw.IPAM)
+	if assert.Len(t, nw.IPAM.Configs, 1) {
+		// parse the string, to make sure it's valid
+		ip, ipnet, err := net.ParseCIDR(nw.IPAM.Configs[0].Subnet)
+		assert.NoError(t, err)
+		components := strings.Split(ip.String(), ".")
+		// ensure the address is 99.99.something.0
+		if assert.Len(t, components, 4) {
+			assert.Equal(t, "99", components[0])
+			assert.Equal(t, "99", components[1])
+			assert.Equal(t, components[2], "0")
+		}
+
+		// assert that the subnet is the expected size
+		parts := strings.Split(ipnet.String(), "/")
+		if assert.Len(t, parts, 2) {
+			assert.Equal(t, parts[1], "24")
+		}
+	}
 }

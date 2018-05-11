@@ -282,14 +282,14 @@ message Mount {
 		// From docker/docker/pkg/mount/flags.go:
 		//
 		// var validFlags = map[string]bool{
-		// 	"":          true,
-		// 	"size":      true, X
-		// 	"mode":      true, X
-		// 	"uid":       true,
-		// 	"gid":       true,
-		// 	"nr_inodes": true,
-		// 	"nr_blocks": true,
-		// 	"mpol":      true,
+		//	"":          true,
+		//	"size":      true, X
+		//	"mode":      true, X
+		//	"uid":       true,
+		//	"gid":       true,
+		//	"nr_inodes": true,
+		//	"nr_blocks": true,
+		//	"mpol":      true,
 		// }
 		//
 		// Some of these may be straightforward to add, but others, such as
@@ -831,6 +831,27 @@ message EncryptionConfig {
 	// should be encrypted at rest in such a way that they must be unlocked
 	// before the manager node starts up again.
 	bool auto_lock_managers = 1;
+}
+
+message DefaultNetworkConfig {
+  // AddressPool reprsents one possible address pool. It is based on the the
+  // github.com/docker/libnetwork/ipamutils.NetworkToSplit, and is used to
+  // define one possible block of the default address pool.
+  message AddressPool {
+    // Base represents the default IP address pool, in CIDR notation, from
+    // which to select default IP addresses. If Base is 10.0.0.0/8, then all
+    // pools will be allocated from within the 10.0.0.0/8 subnet
+    string base = 1;
+    // PoolSize represents the size of the pools actually allocated to each
+    // network. If the size is 24, then each pool will be a /24 subnet of the
+    // total subnet defined in Base.
+    uint32 pool_size = 2;
+  }
+
+  // DefaultAddressPool represents the set of address spaces from which we will
+  // allocate address pools for each network that does not have an address pool
+  // already chosen.
+  repeated AddressPool default_address_pool = 1;
 }
 
 message SpreadOver {

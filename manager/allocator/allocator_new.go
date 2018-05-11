@@ -11,6 +11,12 @@ import (
 	"github.com/docker/swarmkit/manager/allocator/network"
 	"github.com/docker/swarmkit/manager/allocator/network/errors"
 
+	// TODO(dperny): importing libnetwork here is a bit of an inversion of
+	// concerns, but this is just for prototyping reasons, not a permanent
+	// design
+	builtinIpam "github.com/docker/libnetwork/ipams/builtin"
+	"github.com/docker/libnetwork/ipamutils"
+
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/log"
 	"github.com/docker/swarmkit/manager/state/store"
@@ -60,6 +66,7 @@ func init() {
 type NewAllocator struct {
 	store   *store.MemoryStore
 	network network.Allocator
+	pg      plugingetter.PluginGetter
 
 	// fields that make running the allocator thread-safe.
 	runOnce sync.Once
@@ -86,7 +93,7 @@ func NewNew(store *store.MemoryStore, pg plugingetter.PluginGetter) *NewAllocato
 		store:           store,
 		stop:            make(chan struct{}),
 		stopped:         make(chan struct{}),
-		network:         network.NewAllocator(pg),
+		pg:              pg,
 		pendingNetworks: map[string]struct{}{},
 		pendingTasks:    map[string]struct{}{},
 		pendingNodes:    map[string]struct{}{},
@@ -194,6 +201,41 @@ func (a *NewAllocator) run(ctx context.Context) error {
 				// TODO
 			}
 
+			// check if the user has set a default address space
+
+			// first, get the cluster object. there is only ever 1 cluster
+			// object and to get it we list all clusters and take the first
+			// one. discard the error, we don't need it.
+			// TODO(dperny): there should always be 1 cluster, but I'm saving
+			// myself the trouble of changing every tests to create a cluster
+			// object
+			clusters, _ := store.FindClusters(tx, store.All)
+			if len(clusters) == 1 {
+				// if there are any default address pools defined, set the default
+				// address pool on the IPAM config
+				defaultAddressPools := clusters[0].Spec.DefaultNetworkConfig.DefaultAddressPool
+				if len(defaultAddressPools) > 0 {
+					defaultNetworkSplits := make([]*ipamutils.NetworkToSplit, len(defaultAddressPools))
+					for i, pool := range defaultAddressPools {
+						defaultNetworkSplits[i] = &ipamutils.NetworkToSplit{
+							Base: pool.Base,
+							Size: int(pool.PoolSize),
+						}
+						log.G(ctx).Infof("setting default address pool: %v", defaultNetworkSplits[i])
+					}
+
+					// TODO(dperny): i think that this can only work correctly
+					// the first time this initializes, because it sets a
+					// global variable in a sync.Once
+					// TODO(dperny): this doesn't work because this sets the
+					// PredefinedBroadAddressSpace, and swarm networks are
+					// allocated on the PredefinedGranularAddressSpace, or
+					// whatever they're called. So it would take API changes in
+					// libnetwork to work.
+					builtinIpam.SetDefaultIPAddressPool(defaultNetworkSplits)
+				}
+			}
+
 			return nil
 		},
 		api.EventCreateNetwork{},
@@ -213,6 +255,7 @@ func (a *NewAllocator) run(ctx context.Context) error {
 		// TODO(dperny): error handling
 		return err
 	}
+	a.network = network.NewAllocator(a.pg)
 
 	// set up a routine to cancel the event stream when the context is canceled
 	go func() {

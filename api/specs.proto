@@ -418,6 +418,9 @@ message ClusterSpec {
 
 	// EncryptionConfig defines the cluster's encryption settings.
 	EncryptionConfig encryption_config = 8 [(gogoproto.nullable) = false];
+
+  // DefaultNetworkConfig defines the cluster's default network settings
+  DefaultNetworkConfig default_network_config = 9 [(gogoproto.nullable) = false];
 }
 
 // SecretSpec specifies a user-provided secret.
