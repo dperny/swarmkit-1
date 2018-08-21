@@ -32,7 +32,7 @@ type Allocator interface {
 	AllocateTask(*api.Task) error
 	DeallocateTask(*api.Task) error
 
-	AllocateNode(*api.Node, map[string]struct{}) error
+	AllocateNode(*api.Node, *api.Task) error
 	DeallocateNode(*api.Node) error
 }
 
@@ -42,6 +42,18 @@ type allocator struct {
 	// us to avoid having to pass an endpoint from the service when allocating
 	// a task.
 	services map[string]*api.Service
+
+	// nodeNetworkTasks is the map which keeps track of which networks are in
+	// use and by which tasks for a given node. It functions as a sort of
+	// reference count, to determine when a network attachment for a given
+	// network should be allocated or deallocated on a node.
+	//
+	// It is a map of Node IDs to Network IDs to Task IDs. In other terms, it
+	// maps a node ID to a map of network IDs belonging to that node, which
+	// maps to a set of task IDs belonging to that network on that node. This
+	// lets us ensure that edge cases or repeated calls to AllocateNode don't
+	// result in allocating or deallocating unnecessary.
+	nodeNetworksTasks map[string]map[string]map[string]struct{}
 
 	// some networks are node-local, meaning we do not perform driver or IP
 	// address allocation on them. however, we still need to know what they are
@@ -605,15 +617,17 @@ func (a *allocator) DeallocateTask(task *api.Task) error {
 	return a.deallocateAttachments(task.Networks)
 }
 
-// AllocateNode allocates the network attachments for a node. The second
-// argument, a set of networks, is used to indicate which networks the node
-// needs to be attached to. This is necessary because the node's attachments
-// are informed by its task allocations, which is a list not available in this
-// context.
+// AllocateNode allocates the network attachments for a node. Whenever a task
+// is updated with a node assignment (whether it's a global task and has a node
+// assigned from creation time or it's a regular task and the node assignment
+// comes after the task is allocated), this method should be called with that
+// task. When a task enters a terminal state, this method should again be
+// called with that task. The allocator keeps track of what networks are in use
+// on the node, and updates the node's allocations accordingly.
 //
 // If this method returns nil, then the node has been fully allocated, and
 // should be committed. Otherwise, the node will not be altered.
-func (a *allocator) AllocateNode(node *api.Node, requestedNetworks map[string]struct{}) (rerr error) {
+func (a *allocator) AllocateNode(node *api.Node, task *api.Task) (rerr error) {
 	// TODO(dperny): After the initial version, we should remove the code
 	// supporting the singular "attachment" field, and require all upgrades
 	// past this version to pass through this version in order to reallocate
