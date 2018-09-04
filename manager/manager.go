@@ -1012,7 +1012,7 @@ func (m *Manager) becomeLeader(ctx context.Context) {
 			for _, address := range cluster.DefaultAddressPool {
 				_, b, err := net.ParseCIDR(address)
 				if err != nil {
-					log.G(ctx).WithError(err).Error("Default Address Pool reading failed for cluster object  %s", address)
+					log.G(ctx).WithError(err).Errorf("Default Address Pool reading failed for cluster object  %s", address)
 				}
 				m.config.DefaultAddrPool = append(m.config.DefaultAddrPool, b)
 			}
