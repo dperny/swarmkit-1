@@ -129,6 +129,30 @@ func (t *testCluster) MemoryStore() *store.MemoryStore {
 	return t.store
 }
 
+// startDispatcher sets up and starts a canned dispatcher whch is used for the
+// tests.
+//
+// it returns a grpcDispatcher struct, which contains all of the basic fixtures
+// needed for this test. specifically, it includes:
+//
+//   * 1 set of server parts:
+//	   * 1 dispatcher server
+//     * 1 grpc server
+//     * 1 memory store
+//     * 1 CA
+//     * 1 cluster object
+//     * 1 mock driver plugin getter
+//   * 3 sets of clients, each of which has available:
+//     * 1 dispatcher client
+//     * 1 net.Conn to the server
+//     * 1 secrutiy config
+//
+// Among the clients, there is 1 manager and 2 workers.
+//
+// The returned grpcDispatcher struct also includes one method, Close(),
+// which closes all of the client connections, and stops the servers.
+//
+// For the exact field names, see the definition of grpcDispatcher.
 func startDispatcher(c *Config) (*grpcDispatcher, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2045,6 +2069,86 @@ func TestClusterUpdatesSendMessages(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, expected, msg)
 	}
+}
+
+// TestDispatcherStoppingDeadlock tests that stopping the dispatcher in between
+// batch updates can't cause the dispatcher to deadlock.
+//
+// We're testing for a very specific deadlock here, and so this test is very
+// white-box. Specifically, there was a deadlock that could occur where if the
+// Stop method on the dispatcher was called while a call to the Session RPC was
+// being processed, the Session rpc would block in the markNodeReady method
+// waiting on a processNodeUpdatesCond.Broadcast which would never come.
+//
+// The way we can test this reliably, without trying to force a race, is to
+// manually muck about in the guts of the Dispatcher. Specifically, because a
+// call to (*sync.Cond).Wait() requires that a lock is held, we can
+// deliberately stall the Session rpc at that critical point before the Wait by
+// acquiring that lock
+//
+// Note that because this test is so white-boxed, it is rather fragile. If you
+func TestDispatcherStoppingDeadlock(t *testing.T) {
+	// Create the default dispatcher
+	cfg := DefaultConfig()
+	cfg.RateLimitPeriod = 0
+	gd, err := startDispatcher(cfg)
+	require.NoError(t, err)
+	defer gd.Close()
+
+	// first, we need to acquire this lock. This will stop the Broadcast in
+	// (*Dispatcher).processUpdates from being picked up by the Wait in the
+	// markNodeReady call inside of Session.
+	gd.dispatcherServer.processUpdatesCond.L.Lock()
+
+	// since we're testing a deadlock, which is necessarily concurrent, we need
+	// to spawn goroutines, so we can comfortably maintain control in this test
+	// even if the whole dispatcher is locked up.
+
+	// in this first goroutine, we're gonna call Session on the dispatcher
+	// using one of the clients. This call to Session should not complete until
+	// we release the proceedUpdatesCond lock.
+	sessionReturned := make(chan struct{})
+	// i'll explain this one after the goroutine
+	sessionCalled := make(chan struct{})
+	go func() {
+		// we're gonna grab a client here so i don't have to keep retyping
+		// gd.Clients[0]
+		client := gd.Clients[0]
+
+		close(sessionCalled)
+		// this empty Session call is enough for our purposes. we just need to
+		// know when it has returned, we don't actually need any of the return
+		// values
+		_, _ := gd.dispatcherServer.Session(context.Background(), &api.SessionRequest{})
+
+		// close this channel to indicate that the Session call has completed
+		close(sessionReturned)
+	}()
+
+	// unfortunately, the go scheduler makes no guarantee that the above
+	// routine will have started running at any time. The only way we can be
+	// sure it has run (and that the Session call has correctly not returned)
+	// is by making it so this main routine cannot continue until it has run.
+	//
+	// so, to do that, we should block on waiting for sessionCalled to be
+	// closed. we still can't guarantee that Session has ACTUALLY been called,
+	// but it's the best we're gonna do.
+	<-sessionCalled
+
+	// now, make sure that the Session call HASN'T exited
+	select {
+	case <-sessionReturned:
+		t.Errorf("the call to (*Dispatcher).Session returned when it should be blocked")
+	default:
+	}
+
+	// ok, now we spawn another goroutine, this one calling Stop. in the
+	// dispatcher, because of the rpcRW, the Stop method cannot proceed until
+	// all RPCs have exited and released their read locks, so Stop will be
+	// blocked, as the Session call is also blocked.
+	go func() {
+		gd.dispatcherServer.Stop()
+	}()
 }
 
 // mockPluginGetter enables mocking the server plugin getter with customized plugins
