@@ -1,0 +1,152 @@
+// design/csi-plugin.dot
+//
+// This file is a graphviz Dot file, which is used to generate a flow chart
+// defining the life cycle of a volume managed by a CSI plugin. This flow chart
+// is from the Container Orchestrator's perspective, not the volume or the
+// plugin's perspective.
+//
+// This flowchart elides trivial, unresolvable error handling. If there is no
+// reasonable action the CO can take other than to return an error to the user,
+// we ignore that path.
+//
+// To build this file as, for example, a PNG, make sure you have graphviz
+// installed, and then run
+//
+// dot -Tpng -o csi-plugin.dot
+
+digraph main {
+  // graphviz is a pretty low-level and obtuse language to use. if we want to
+  // do anything particularly pretty or interesting, we have to do weird stuff
+  // like this. we're creating "subgraph" blocks to define all of our nodes and
+  // edges. this way, when we apply styling, everything defined in the same
+  // block has the same style.
+  //
+  // any nodes we define in any subgraph block are available in any other
+  // block, so, essentially, we define our nodes in one subgraph, but actually
+  // use them in another.
+
+  // we're starting off by defining all of our nodes. we're using the node
+  // types and shapes that wikipedia says is the ANSI standards.
+
+  // start_terminals defines all of the flowchart entry point nodes. these are
+  // rounded rectangle nodes, colored red.
+  subgraph start_terminals {
+    // the 'node' keyword lets us define attributes for all nodes
+    node [style="rounded,filled", shape="box", fillcolor="#ffbfc9"];
+    create_volume [label="a new volume is needed"];
+    volume_needed [label="a volume is needed on a node"];
+  };
+
+  // end_terminals defines all of the flowchart exit points. these are also
+  // rounded rectangle nodes, colored green.
+  subgraph end_terminals {
+    node [style="rounded,filled", shape="box", fillcolor="#8bef91"];
+    volume_created [label="the volume is ready"];
+    volume_published [label="the volume is published"];
+  };
+
+  // decision defines all decision points along the graph. the decision node
+  // label will be the question being asked, and all outward edges are the
+  // possible answers.
+  subgraph decision {
+    node [shape="diamond"];
+    // decisions for the create case
+    supports_controller_service [label="CONTROLLER_SERIVCE"];
+    supports_create_delete [label="CREATE_DELETE_VOLUME"];
+
+    // decisions for the publish case
+    supports_controller_service_pub [label="CONTROLLER_SERVICE"];
+    supports_publish_unpublish [label="PUBLISH_UNPUBLISH_VOLUME"];
+    supports_stage_unstage [label="STAGE_UNSTAGE_VOLUME"];
+  };
+
+  // process defines an action to take. these are just plain old boxes.
+  subgraph process {
+    node [shape="box"];
+    call_create_volume [label="call CreateVolume"];
+    no_create_action_needed [label="no call to the plugin is needed"];
+
+    call_publish_volume [label="call PublishVolume"];
+    send_to_node [label="send down the Task to the node"];
+    recieve_on_node [label="recieve new task"];
+    call_node_stage_volume [label="call NodeStageVolume"];
+    call_node_publish_volume [label="call NodePublishVolume"];
+  };
+
+  // this file describes a couple of different workflows, each of which is
+  // pretty much self-contained from the others. in order to logically separate
+  // them, we'll use clusters. clusters are subgraphs whose names start with 
+  // "cluster_" (yeah, semantic naming, graphviz is a mess). everything in a
+  // cluster will be drawn inside of the same box
+
+  // cluster_create describes the workflow for creating a new volume
+  subgraph cluster_create {
+    // this bare label directive sets the label for the cluster
+    label="Create A Volume";
+    // this sets the position of the label to the left, instead of the center.
+    labeljust="l";
+
+    create_volume -> supports_controller_service;
+
+    supports_controller_service -> supports_create_delete [label="supported"];
+    supports_controller_service -> no_create_action_needed [label="not supported"];
+
+    supports_create_delete -> call_create_volume [label="supported"];
+    supports_create_delete -> no_create_action_needed [label="not supported"];
+
+    call_create_volume -> volume_created;
+    no_create_action_needed -> volume_created;
+  };
+
+  // cluster_publish describes the workflow for publishing an existing volume
+  // on a node.
+  subgraph cluster_publish {
+    label="Publish a Volume to a Node";
+    labeljust="l";
+
+    // setting newrank lets us put the top of each subgraph in the same rank
+    newrank="true";
+
+    // for extremely stupid reasons, we have to define the node cluster before
+    // we define the manager cluster. whichever of these two clusters is
+    // defined first for some reason gets drawn to the right of the other.
+
+    // cluster_node describes the actions that occur on the node that the
+    // volume is ultimately needed on.
+    subgraph cluster_node {
+      label="Container Orchestrator Node";
+      labeljust="l";
+
+      recieve_on_node -> supports_stage_unstage;
+      supports_stage_unstage -> call_node_stage_volume [label="supported"];
+      supports_stage_unstage -> call_node_publish_volume [label="not supported"];
+      call_node_stage_volume -> call_node_publish_volume;
+      call_node_publish_volume -> volume_published;
+    };
+
+    // cluster_manager describes the actions that occur on the manager node
+    subgraph cluster_manager {
+      label="Container Orchestrator Manager";
+      labeljust="l";
+
+      volume_needed -> supports_controller_service_pub;
+      supports_controller_service_pub -> supports_publish_unpublish [label="supported"];
+      supports_controller_service_pub -> send_to_node [label="not supported"];
+      supports_publish_unpublish -> call_publish_volume [label="supported"];
+      supports_publish_unpublish -> send_to_node [label="not supported"];
+      call_publish_volume -> send_to_node;
+    };
+
+    // this edge bridges the manager and node clusters. it's defined after
+    // everything else so that the nodes it bridges are in their respective
+    // clusters. 
+    send_to_node -> recieve_on_node [style="dashed"];
+
+    // in order to make the manager and node clusters appear side-by-side, we
+    // create this anonymous subgraph, and we set the rank of the top of both
+    // graphs to be "same". this means they'll be vertically in the same row.
+    // without this, the node cluster would appear underneath the manager
+    // cluster.
+    { rank="same"; volume_needed; recieve_on_node; }
+  };
+}
