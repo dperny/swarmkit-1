@@ -29,7 +29,6 @@ import (
 	"github.com/docker/swarmkit/ioutils"
 	"github.com/docker/swarmkit/log"
 	"github.com/docker/swarmkit/manager"
-	"github.com/docker/swarmkit/manager/allocator/cnmallocator"
 	"github.com/docker/swarmkit/manager/encryption"
 	"github.com/docker/swarmkit/remotes"
 	"github.com/docker/swarmkit/xnet"
@@ -107,8 +106,15 @@ type Config struct {
 	// for connections to the remote API (including the raft service).
 	AdvertiseRemoteAPI string
 
-	// NetworkConfig stores network related config for the cluster
-	NetworkConfig *cnmallocator.NetworkConfig
+	// DefaultAddrPool specifies default subnet pool for global scope networks
+	DefaultAddrPool []string
+
+	// SubnetSize specifies the subnet size of the networks created from
+	// the default subnet pool
+	SubnetSize uint32
+
+	// VXLANUDPPort specifies the UDP port number for VXLAN traffic
+	VXLANUDPPort uint32
 
 	// Executor specifies the executor to use for the agent.
 	Executor exec.Executor
@@ -1013,7 +1019,9 @@ func (n *Node) runManager(ctx context.Context, securityConfig *ca.SecurityConfig
 		PluginGetter:     n.config.PluginGetter,
 		RootCAPaths:      rootPaths,
 		FIPS:             n.config.FIPS,
-		NetworkConfig:    n.config.NetworkConfig,
+		DefaultAddrPool:  n.config.DefaultAddrPool,
+		SubnetSize:       n.config.SubnetSize,
+		VXLANUDPPort:     n.config.VXLANUDPPort,
 	})
 	if err != nil {
 		return false, err
