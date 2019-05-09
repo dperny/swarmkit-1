@@ -2,10 +2,6 @@
 
 package network
 
-import (
-	"github.com/docker/swarmkit/manager/allocator/networkallocator"
-)
-
 // NOTE(dperny): these driver names are also indepedently in the helpers
 // package. If you add or remote drivers, you need to do so there as well.
 

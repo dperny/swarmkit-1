@@ -1,8 +1,9 @@
 package helpers
 
 import (
-	"github.com/docker/swarmkit/api"
 	"runtime"
+
+	"github.com/docker/swarmkit/api"
 )
 
 const (

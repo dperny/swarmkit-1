@@ -225,44 +225,6 @@ func TestNetworkNotMarkedForDeletion(t *testing.T) {
 		false)
 }
 
-// this test that the deallocator also works with the "old" style of storing
-// networks directly on the  service spec (instead of the task spec)
-// TODO: as said in the source file, we should really add a helper
-// on services objects itself, and test it there instead
-func TestDeallocatorWithOldStyleNetworks(t *testing.T) {
-	s := store.NewMemoryStore(nil)
-	require.NotNil(t, s)
-	defer s.Close()
-
-	service := newService("service", true)
-
-	// add a couple of networks with the old style
-	network1 := newNetwork("network1", true)
-	network2 := newNetwork("network2", false)
-	service.Spec.Networks = append(service.Spec.Networks, newNetworkConfigs(network1, network2)...)
-	task := newTask("task", service)
-
-	createDBObjects(t, s, service, network1, network2, task)
-
-	deallocator, ran := startNewDeallocator(t, s,
-		// nothing should have been deleted
-		false)
-	defer stopDeallocator(t, deallocator, ran)
-
-	// now let's delete the one task saving it all from oblivion
-	updateStoreAndWaitForEvent(t, deallocator, func(tx store.Tx) {
-		require.NoError(t, store.DeleteTask(tx, task.ID))
-	}, true)
-
-	// the deallocator should have removed both the service and
-	// the first network, but not the second
-	s.View(func(tx store.ReadTx) {
-		require.Nil(t, store.GetService(tx, service.ID))
-		require.Nil(t, store.GetNetwork(tx, network1.ID))
-		require.NotNil(t, store.GetNetwork(tx, network2.ID))
-	})
-}
-
 // Helpers below
 
 // starts a new deallocator, and also creates a channel to retrieve the return

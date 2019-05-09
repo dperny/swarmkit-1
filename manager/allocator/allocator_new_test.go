@@ -1565,8 +1565,7 @@ func TestNodeAllocatorDeletingNetworkRace(t *testing.T) {
 	assert.NotNil(t, s)
 	defer s.Close()
 
-	a, err := New(s, nil)
-	assert.NoError(t, err)
+	a := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a)
 
 	var node1 *api.Node
@@ -1656,9 +1655,8 @@ func TestNodeAllocatorDeletingNetworkRace(t *testing.T) {
 	}))
 
 	// then, start up a fresh new allocator
-	a2, err := New(s, nil)
+	a2 := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a2)
-	assert.NoError(t, err)
 
 	waitStop2 := make(chan struct{})
 	var runErr2 error

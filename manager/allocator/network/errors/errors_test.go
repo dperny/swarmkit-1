@@ -1,8 +1,9 @@
 package errors
 
 import (
-	"github.com/stretchr/testify/require"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // The tests in this file are mostly boilerplate, and their purpose is

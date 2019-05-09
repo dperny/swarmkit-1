@@ -16,11 +16,6 @@ const (
 	// ports will be allocated when the user did not specify a port.
 	DynamicPortEnd uint32 = 32767
 
-	// The start of master port range which will hold all the allocation state
-	// of ports allocated so far regardless of whether it was user defined or
-	// not.
-	masterPortStart uint32 = 1
-
 	// The end of master port range which will hold all the allocation state of
 	// ports allocated so far regardless of whether it was user defined or not.
 	masterPortEnd uint32 = 65535
