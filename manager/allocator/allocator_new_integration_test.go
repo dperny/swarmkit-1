@@ -109,7 +109,7 @@ var _ = Describe("allocator.NewAllocator", func() {
 		// the allocator has no PluginGetter.
 		// TODO(dperny): we should handle this case, somehow, and provide a
 		// PluginGetter so the integration tests can run with it.
-		allocator = NewNew(dataStore, nil)
+		allocator = NewNew(dataStore, nil, nil, 0)
 
 		// reinitialize this channel every spec
 		allocatorExitResult = make(chan error)

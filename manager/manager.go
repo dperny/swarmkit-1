@@ -1036,7 +1036,12 @@ func (m *Manager) becomeLeader(ctx context.Context) {
 	// swarmkit with the new allocator compiled in, and switch on its use
 	// dynamically
 	if os.Getenv("SWARMKIT_USE_NEW_ALLOCATOR") == "iknowtherisk" {
-		m.newallocator = allocator.NewNew(s, m.config.PluginGetter)
+		m.newallocator = allocator.NewNew(
+			s,
+			m.config.PluginGetter,
+			m.config.DefaultAddrPool,
+			m.config.SubnetSize,
+		)
 	} else {
 		m.allocator, err = allocator.New(s, m.config.PluginGetter, netCfg)
 		if err != nil {

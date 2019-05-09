@@ -81,7 +81,7 @@ func newAllocatorWithComponents(ipamAlloc ipam.Allocator, driverAlloc driver.All
 // NewAllocator creates and returns a new, ready-to use allocator for all
 // network resources. Before it can be used, the caller must call Restore with
 // any existing objects that need to be restored to create the state
-func NewAllocator(pg plugingetter.PluginGetter) Allocator {
+func NewAllocator(pg plugingetter.PluginGetter, defaultAddrPool []string, subnetSize uint32) Allocator {
 	// NOTE(dperny): the err return value is currently not used in
 	// drvregistry.New function. I get that it's very frowned upon to rely on
 	// implementation details like that, but it simplifies the allocator enough
@@ -99,8 +99,9 @@ func NewAllocator(pg plugingetter.PluginGetter) Allocator {
 		}
 	}
 
-	// then, initialize the IPAM drivers
-	if err := initIPAMDrivers(reg); err != nil {
+	// then, initialize the IPAM drivers. pass the defaults that we have in
+	// turn been passed
+	if err := initIPAMDrivers(reg, defaultAddrPool, subnetSize); err != nil {
 		panic(fmt.Sprintf("initIPAMDrivers returned an error: %v", err))
 	}
 	return &allocator{

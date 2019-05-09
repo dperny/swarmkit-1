@@ -30,7 +30,7 @@ func TestNewAllocator(t *testing.T) {
 	assert.NotNil(t, s)
 	defer s.Close()
 
-	a := NewNew(s, nil)
+	a := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a)
 
 	// Predefined node-local network
@@ -722,7 +722,7 @@ func TestNewNoDuplicateIPs(t *testing.T) {
 
 			return nil
 		}))
-		a := NewNew(s, nil)
+		a := NewNew(s, nil, nil, 0)
 		assert.NotNil(t, a)
 
 		waitStop := make(chan struct{})
@@ -862,7 +862,7 @@ func TestNewAllocatorRestoreForDuplicateIPs(t *testing.T) {
 		return true
 	}
 
-	a := NewNew(s, nil)
+	a := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a)
 
 	waitStop := make(chan struct{})
@@ -1024,7 +1024,7 @@ func TestNewAllocatorRestartNoEndpointSpec(t *testing.T) {
 		return true
 	}
 
-	a := NewNew(s, nil)
+	a := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a)
 
 	waitStop := make(chan struct{})
@@ -1269,7 +1269,7 @@ func TestNewAllocatorRestoreForUnallocatedNetwork(t *testing.T) {
 		return true
 	}
 
-	a := NewNew(s, nil)
+	a := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a)
 
 	waitStop := make(chan struct{})
@@ -1302,7 +1302,7 @@ func TestNewNodeAllocator(t *testing.T) {
 	assert.NotNil(t, s)
 	defer s.Close()
 
-	a := NewNew(s, nil)
+	a := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a)
 
 	var node1FromStore *api.Node
@@ -1441,7 +1441,7 @@ func TestNewNodeAllocatorDeletingNetworkRace(t *testing.T) {
 	assert.NotNil(t, s)
 	defer s.Close()
 
-	a := NewNew(s, nil)
+	a := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a)
 
 	var node1 *api.Node
@@ -1537,7 +1537,7 @@ func TestNewNodeAllocatorDeletingNetworkRace(t *testing.T) {
 	}))
 
 	// then, start up a fresh new allocator
-	a2 := NewNew(s, nil)
+	a2 := NewNew(s, nil, nil, 0)
 	assert.NotNil(t, a2)
 
 	ctx2, cancel2 := context.WithCancel(context.Background())

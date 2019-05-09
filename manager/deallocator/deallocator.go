@@ -200,12 +200,7 @@ func (deallocator *Deallocator) deallocateService(ctx context.Context, service *
 
 		// then all of its networks, provided no other service uses them
 		spec := service.Spec
-		// see https://github.com/docker/swarmkit/blob/e2aafdd3453d2ab103dd97364f79ea6b857f9446/api/specs.proto#L80-L84
-		// we really should have a helper function on services to do this...
 		networkConfigs := spec.Task.Networks
-		if len(networkConfigs) == 0 {
-			networkConfigs = spec.Networks
-		}
 		for _, networkConfig := range networkConfigs {
 			if network := store.GetNetwork(tx, networkConfig.Target); network != nil {
 				deallocator.processNetwork(ctx, tx, network, ignoreServiceID)

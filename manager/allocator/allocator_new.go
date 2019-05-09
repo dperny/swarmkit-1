@@ -62,7 +62,6 @@ type NewAllocator struct {
 	store   *store.MemoryStore
 	network network.Allocator
 
-	// fields that make running the allocator thread-safe.
 	runOnce sync.Once
 
 	// fields to make stopping the allocator possible and safe through the stop
@@ -115,12 +114,12 @@ type NewAllocator struct {
 }
 
 // NewNew creates a NewAllocator object
-func NewNew(store *store.MemoryStore, pg plugingetter.PluginGetter) *NewAllocator {
+func NewNew(store *store.MemoryStore, pg plugingetter.PluginGetter, defAddrPool []string, subnetSize uint32) *NewAllocator {
 	a := &NewAllocator{
 		store:           store,
 		stop:            make(chan struct{}),
 		stopped:         make(chan struct{}),
-		network:         network.NewAllocator(pg),
+		network:         network.NewAllocator(pg, defAddrPool, subnetSize),
 		pendingNetworks: map[string]struct{}{},
 		pendingTasks:    map[string]struct{}{},
 		pendingNodes:    map[string]struct{}{},
