@@ -230,6 +230,11 @@ func (vm *Manager) handleVolume(id string) {
 		return
 	}
 
+	if volume.PendingDelete {
+		vm.deleteVolume(volume)
+		return
+	}
+
 	updated := false
 	for _, status := range volume.PublishStatus {
 		if status.State == api.VolumePublishStatus_PENDING_PUBLISH {
@@ -287,4 +292,19 @@ func (vm *Manager) handleNodeRemove(nodeID string) {
 	for _, plugin := range vm.plugins {
 		plugin.RemoveNode(nodeID)
 	}
+}
+
+// TODO(dperny): return and handle an error
+func (vm *Manager) deleteVolume(v *api.Volume) {
+	// TODO(dperny): handle missing plugin
+	plug := vm.plugins[v.Spec.Driver.Name]
+	err := plug.DeleteVolume(context.TODO(), v)
+	if err != nil {
+		return
+	}
+
+	// TODO(dperny): handle update error
+	vm.store.Update(func(tx store.Tx) error {
+		return store.DeleteVolume(tx, v.ID)
+	})
 }

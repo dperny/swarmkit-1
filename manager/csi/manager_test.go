@@ -597,12 +597,14 @@ var _ = Describe("Manager", func() {
 			}
 
 			// couple of quick helpers to make subsequent matchers more readable
-			pollStore := func(id string) *api.Volume {
-				var v *api.Volume
-				s.View(func(tx store.ReadTx) {
-					v = store.GetVolume(tx, id)
-				})
-				return v
+			pollStore := func(id string) func() *api.Volume {
+				return func() *api.Volume {
+					var v *api.Volume
+					s.View(func(tx store.ReadTx) {
+						v = store.GetVolume(tx, id)
+					})
+					return v
+				}
 			}
 
 			// quick one-off matcher composed from WithTransform
@@ -634,6 +636,90 @@ var _ = Describe("Manager", func() {
 			Expect(pluginMaker.plugins["plug2"].volumesPublished[v2.ID]).To(
 				ConsistOf("node1"),
 			)
+		})
+	})
+
+	Describe("removing a Volume", func() {
+		BeforeEach(func() {
+			plugins = append(plugins, &api.CSIConfig_Plugin{
+				Name: "plug",
+			})
+		})
+
+		JustBeforeEach(func() {
+			volume := &api.Volume{
+				ID: "volumeID",
+				Spec: api.VolumeSpec{
+					Annotations: api.Annotations{
+						Name: "volumeName",
+					},
+					Driver: &api.Driver{
+						Name: "plug",
+					},
+					Availability: api.VolumeAvailabilityDrain,
+				},
+				VolumeInfo: &api.VolumeInfo{
+					VolumeID: "plugID",
+				},
+			}
+
+			err := s.Update(func(tx store.Tx) error {
+				return store.CreateVolume(tx, volume)
+			})
+			Expect(err).ToNot(HaveOccurred())
+			vm.init()
+		})
+
+		It("should delete the Volume", func() {
+			err := s.Update(func(tx store.Tx) error {
+				v := store.GetVolume(tx, "volumeID")
+				v.PendingDelete = true
+				return store.UpdateVolume(tx, v)
+			})
+			Expect(err).ToNot(HaveOccurred())
+			passEvents(watch, func(ev events.Event) bool {
+				_, ok := ev.(api.EventUpdateVolume)
+				return ok
+			}, vm.handleEvent)
+
+			By("calling DeleteVolume on the plugin")
+			Expect(pluginMaker.plugins["plug"].volumesDeleted).To(ConsistOf("volumeID"))
+
+			By("removing the Volume from the store")
+			Eventually(func() *api.Volume {
+				var v *api.Volume
+				s.View(func(tx store.ReadTx) {
+					v = store.GetVolume(tx, "volumeID")
+				})
+				return v
+			}).Should(BeNil())
+		})
+
+		It("should not remove the volume from the store if DeleteVolume fails", func() {
+			err := s.Update(func(tx store.Tx) error {
+				v := store.GetVolume(tx, "volumeID")
+				v.PendingDelete = true
+				v.Spec.Annotations.Labels = map[string]string{
+					failDeleteLabel: "failing delete test",
+				}
+				return store.UpdateVolume(tx, v)
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			passEvents(watch, func(ev events.Event) bool {
+				_, ok := ev.(api.EventUpdateVolume)
+				return ok
+			}, vm.handleEvent)
+
+			Expect(pluginMaker.plugins["plug"].volumesDeleted).To(ConsistOf("volumeID"))
+
+			Consistently(func() *api.Volume {
+				var v *api.Volume
+				s.View(func(tx store.ReadTx) {
+					v = store.GetVolume(tx, "volumeID")
+				})
+				return v
+			}).ShouldNot(BeNil())
 		})
 	})
 })
